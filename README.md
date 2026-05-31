@@ -14,8 +14,8 @@ macOS doesn't quarantine it — **no Apple Developer account, no notarization, n
 "unidentified developer" warning.**
 
 ```sh
-git clone https://github.com/YOUR_USERNAME/spotify-transposer.git
-cd spotify-transposer
+git clone https://github.com/evanhu1/transposify.git
+cd transposify
 ./install.sh
 ```
 
