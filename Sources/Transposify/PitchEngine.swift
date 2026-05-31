@@ -82,13 +82,13 @@ final class PitchEngine {
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,
             channels: AVAudioChannelCount(channels))
-        else { throw NSError(domain: "Transposer", code: -1) }
+        else { throw NSError(domain: "Transposify", code: -1) }
 
         let options = Self.optionProcessRealTime | Self.optionEngineFiner | Self.optionPitchHighQuality
         let initialScale = pow(2.0, Double(targetSemitones.get()) / 12.0)
         guard let state = rubberband_new(UInt32(sampleRate), UInt32(channels),
                                          options, 1.0, initialScale) else {
-            throw NSError(domain: "Transposer", code: -2)
+            throw NSError(domain: "Transposify", code: -2)
         }
         rubberband_set_max_process_size(state, UInt32(Self.maxBlock))
         rb = state

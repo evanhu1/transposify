@@ -70,7 +70,7 @@ let tapUID = cfStr?.takeRetainedValue() as String? ?? "(nil)"
 print("  tapUID:", tapUID)
 
 // 5. aggregate device
-let aggUID = "com.evanhu.transposer.probe-\(UUID().uuidString)"
+let aggUID = "com.evanhu.transposify.probe-\(UUID().uuidString)"
 let aggDesc: [String: Any] = [
     kAudioAggregateDeviceNameKey: "Probe Aggregate",
     kAudioAggregateDeviceUIDKey: aggUID,

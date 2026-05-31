@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Spotify Transposer — one-step build & install.
+# Transposify — one-step build & install.
 #
 # Builds the app from source on your Mac and installs it to /Applications.
 # Because it's compiled locally, macOS doesn't quarantine it, so no Apple
@@ -10,8 +10,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="Transposer.app"
-BUNDLE_ID="com.evanhu.transposer"
+APP="Transposify.app"
+BUNDLE_ID="com.evanhu.transposify"
 
 echo "==> Checking prerequisites"
 osver="$(sw_vers -productVersion)"
@@ -33,7 +33,10 @@ echo "==> Building and signing (first build takes a minute)"
 ./make-app.sh
 
 # Stop any running copy so the fresh build takes over.
-pkill -f "$APP/Contents/MacOS/Transposer" 2>/dev/null || true
+pkill -f "$APP/Contents/MacOS/Transposify" 2>/dev/null || true
+# Clean up the previous "Transposer" name, if a prior version was installed.
+pkill -f "Transposer.app/Contents/MacOS/Transposer" 2>/dev/null || true
+rm -rf "/Applications/Transposer.app" "$HOME/Applications/Transposer.app" 2>/dev/null || true
 sleep 0.5
 
 if [ -w /Applications ]; then

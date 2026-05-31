@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Transposer",
+    name: "Transposify",
     platforms: [.macOS(.v15)],
     targets: [
         // Rubber Band Library (R3 engine), vendored as its single-file build.
@@ -15,9 +15,9 @@ let package = Package(
             linkerSettings: [.linkedFramework("Accelerate")]
         ),
         .executableTarget(
-            name: "Transposer",
+            name: "Transposify",
             dependencies: ["CRubberBand"],
-            path: "Sources/Transposer"
+            path: "Sources/Transposify"
         ),
     ],
     swiftLanguageModes: [.v5],

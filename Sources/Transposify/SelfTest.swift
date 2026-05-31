@@ -1,7 +1,7 @@
 import AppKit
 
 /// Headless verification of the engagement state machine + per-song memory,
-/// run with TRANSPOSER_SELFTEST=1. Stubs the audio side so it needs no mic,
+/// run with TRANSPOSIFY_SELFTEST=1. Stubs the audio side so it needs no mic,
 /// Spotify, or audio device. Prints PASS/FAIL and exits non-zero on failure.
 enum SelfTest {
     private struct Step {
@@ -79,7 +79,7 @@ enum SelfTest {
             controller.setRemember(false)
             let err = FileHandle.standardError
             func emit(_ s: String) { err.write((s + "\n").data(using: .utf8)!) }
-            emit("\n===== Transposer self-test =====")
+            emit("\n===== Transposify self-test =====")
             var failed = 0
             for (label, ok, detail) in results {
                 emit("\(ok ? "PASS" : "FAIL")  \(label)\(detail.isEmpty ? "" : "  [\(detail)]")")

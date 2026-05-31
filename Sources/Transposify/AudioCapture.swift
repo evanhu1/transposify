@@ -61,7 +61,7 @@ final class AudioCapture {
 
         // 1. Create the process tap.
         let desc = CATapDescription(stereoMixdownOfProcesses: [processObject])
-        desc.name = "Transposer Tap"
+        desc.name = "Transposify Tap"
         desc.isPrivate = true
         desc.muteBehavior = .mutedWhenTapped
 
@@ -91,9 +91,9 @@ final class AudioCapture {
         ring = RingBuffer(capacityFloats: Int(sampleRate * 0.5) * channelCount)
 
         // 3. Wrap the tap in a private aggregate device so it delivers IO.
-        let aggregateUID = "com.evanhu.transposer.aggregate-\(UUID().uuidString)"
+        let aggregateUID = "com.evanhu.transposify.aggregate-\(UUID().uuidString)"
         let description: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Transposer Capture",
+            kAudioAggregateDeviceNameKey: "Transposify Capture",
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceTapListKey: [

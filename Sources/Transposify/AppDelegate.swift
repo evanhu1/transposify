@@ -12,17 +12,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        if ProcessInfo.processInfo.environment["TRANSPOSER_SELFTEST"] == "1" {
+        if ProcessInfo.processInfo.environment["TRANSPOSIFY_SELFTEST"] == "1" {
             SelfTest.run(controller)
             return
         }
 
-        if let path = ProcessInfo.processInfo.environment["TRANSPOSER_SNAPSHOT"] {
+        if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT"] {
             snapshotPopover(to: path)
             return
         }
 
-        if ProcessInfo.processInfo.environment["TRANSPOSER_RBTEST"] == "1" {
+        if ProcessInfo.processInfo.environment["TRANSPOSIFY_RBTEST"] == "1" {
             RubberBandTest.run()
             return
         }
@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         let numberWidth = ("\u{2212}12" as NSString).size(withAttributes: [.font: menuFont]).width
         let clef = Self.trebleClefImage()
-        statusItem = NSStatusBar.system.statusItem(withLength: ceil(clef.size.width + numberWidth) + 6)
+        statusItem = NSStatusBar.system.statusItem(withLength: ceil(clef.size.width + numberWidth) + 2)
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(togglePopover)
@@ -91,9 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Env-gated affordances for headless testing (no-ops in normal use).
     private func applyDebugHooks() {
         let env = ProcessInfo.processInfo.environment
-        if let v = env["TRANSPOSER_DEBUG_PITCH"], let n = Int(v) { controller.setSemitones(n) }
-        if env["TRANSPOSER_DEBUG_KARAOKE"] == "1" { controller.setKaraoke(true) }
-        if let q = env["TRANSPOSER_DEBUG_QUIT_AFTER"], let secs = Double(q) {
+        if let v = env["TRANSPOSIFY_DEBUG_PITCH"], let n = Int(v) { controller.setSemitones(n) }
+        if env["TRANSPOSIFY_DEBUG_KARAOKE"] == "1" { controller.setKaraoke(true) }
+        if let q = env["TRANSPOSIFY_DEBUG_QUIT_AFTER"], let secs = Double(q) {
             DispatchQueue.main.asyncAfter(deadline: .now() + secs) { NSApp.terminate(nil) }
         }
     }
@@ -177,7 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit Transposer",
+        appMenu.addItem(withTitle: "Quit Transposify",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         NSApp.mainMenu = mainMenu

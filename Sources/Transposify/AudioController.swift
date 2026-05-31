@@ -1,7 +1,7 @@
 import AppKit
 import os
 
-let log = Logger(subsystem: "com.evanhu.transposer", category: "audio")
+let log = Logger(subsystem: "com.evanhu.transposify", category: "audio")
 
 /// Owns the capture + pitch pipeline and decides when it should run.
 ///

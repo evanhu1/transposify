@@ -3,13 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Transposer</string>
+    <string>Transposify</string>
     <key>CFBundleDisplayName</key>
-    <string>Spotify Transposer</string>
+    <string>Transposify</string>
     <key>CFBundleIdentifier</key>
-    <string>com.evanhu.transposer</string>
+    <string>com.evanhu.transposify</string>
     <key>CFBundleExecutable</key>
-    <string>Transposer</string>
+    <string>Transposify</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -23,8 +25,8 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>Spotify Transposer captures Spotify's audio so it can pitch-shift it in real time.</string>
+    <string>Transposify captures Spotify's audio so it can pitch-shift it in real time.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Spotify Transposer needs audio-capture access to read Spotify's audio output.</string>
+    <string>Transposify needs audio-capture access to read Spotify's audio output.</string>
 </dict>
 </plist>

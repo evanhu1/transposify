@@ -1,7 +1,7 @@
 # Build output
 .build/
 .swiftpm/
-/Transposer.app/
+/Transposify.app/
 
 # macOS
 .DS_Store

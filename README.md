@@ -1,4 +1,4 @@
-# Spotify Transposer
+# Transposify
 
 A macOS menu-bar app that lets you **sing along to any Spotify song in your
 range** — shift the key up or down by semitones in real time, pitch without
@@ -6,7 +6,7 @@ tempo change. It stays out of the way: a small `𝄞 +2` / `𝄞 −3` / `𝄞 0
 menu bar, and a popup when you click it. Settings are remembered per song.
 
 <p align="center">
-  <img src="docs/popover.png" alt="Spotify Transposer popover" width="320">
+  <img src="docs/popover.png" alt="Transposify popover" width="320">
 </p>
 
 ## Install
@@ -31,7 +31,7 @@ command-line tools (`xcode-select --install` if `swift` isn't found).
 
 **Uninstall:**
 ```sh
-rm -rf /Applications/Transposer.app && tccutil reset Microphone com.evanhu.transposer
+rm -rf /Applications/Transposify.app && tccutil reset Microphone com.evanhu.transposify
 ```
 
 ## Using it
@@ -87,11 +87,11 @@ Spotify ─► Core Audio process tap (muted-when-tapped) ─► ring buffer
 
 ```sh
 swift probe.swift                              # OSStatus of each Core Audio tap call
-TRANSPOSER_SELFTEST=1 .build/debug/Transposer  # headless engagement state-machine test
-TRANSPOSER_RBTEST=1   .build/debug/Transposer  # Rubber Band pitch-accuracy check (440Hz +7st)
+TRANSPOSIFY_SELFTEST=1 .build/debug/Transposify  # headless engagement state-machine test
+TRANSPOSIFY_RBTEST=1   .build/debug/Transposify  # Rubber Band pitch-accuracy check (440Hz +7st)
 ```
 
-To build without installing: `./make-app.sh && open Transposer.app`.
+To build without installing: `./make-app.sh && open Transposify.app`.
 
 ## License
 

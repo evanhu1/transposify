@@ -3,7 +3,7 @@ import CRubberBand
 
 /// Headless proof that the Rubber Band integration actually shifts pitch:
 /// push a 440 Hz sine through the real R3 engine at +7 semitones and measure
-/// the output frequency via zero crossings. Run with TRANSPOSER_RBTEST=1.
+/// the output frequency via zero crossings. Run with TRANSPOSIFY_RBTEST=1.
 enum RubberBandTest {
     static func run() {
         let err = FileHandle.standardError
