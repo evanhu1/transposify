@@ -1,29 +1,32 @@
 import AppKit
 
-/// Slider with a flat gray track and an amber knob, matching the app's look.
+/// Accent used for the slider knob and the active transpose value.
+private let transposeAccent = NSColor(calibratedRed: 0.23, green: 0.51, blue: 0.96, alpha: 1)
+
+/// Slider with a flat gray track and an accent knob.
 private final class TransposeSliderCell: NSSliderCell {
     override func drawBar(inside rect: NSRect, flipped: Bool) {
         let height: CGFloat = 4
         var bar = rect
         bar.origin.y = rect.midY - height / 2
         bar.size.height = height
-        NSColor(white: 0.30, alpha: 1).setFill()
+        NSColor(white: 0.5, alpha: 0.30).setFill()
         NSBezierPath(roundedRect: bar, xRadius: height / 2, yRadius: height / 2).fill()
     }
 
     override func drawKnob(_ knobRect: NSRect) {
-        let diameter: CGFloat = 16
+        let diameter: CGFloat = 15
         let frame = NSRect(x: knobRect.midX - diameter / 2,
                            y: knobRect.midY - diameter / 2,
                            width: diameter, height: diameter)
-        NSColor(calibratedRed: 0.23, green: 0.51, blue: 0.96, alpha: 1).setFill()
+        transposeAccent.setFill()
         NSBezierPath(ovalIn: frame).fill()
     }
 }
 
 /// The popup shown from the menu bar: now-playing, a one-knob pitch control,
-/// a karaoke toggle, and per-song / launch-at-login options. Designed for
-/// singers, not musicians — direction and plain language over jargon.
+/// and three toggles. Designed for singers, not musicians — direction and
+/// plain language over jargon.
 final class PopoverViewController: NSViewController {
     private let controller: AudioController
     private let spotify: SpotifyState
@@ -34,10 +37,8 @@ final class PopoverViewController: NSViewController {
     private let slider = NSSlider()
     private let resetButton = NSButton()
     private let karaokeSwitch = NSSwitch()
-    private let rememberCheck = NSButton(checkboxWithTitle: "Remember key for this song",
-                                         target: nil, action: nil)
-    private let loginCheck = NSButton(checkboxWithTitle: "Launch at login",
-                                      target: nil, action: nil)
+    private let rememberSwitch = NSSwitch()
+    private let loginSwitch = NSSwitch()
 
     init(controller: AudioController, spotify: SpotifyState) {
         self.controller = controller
@@ -48,15 +49,14 @@ final class PopoverViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
-        let width: CGFloat = 300
+        let width: CGFloat = 296
 
-        // Now playing -------------------------------------------------------
-        // Spotify doesn't reliably expose cover art, so the title gets a small
-        // inline music glyph instead of an album thumbnail.
-        let titleIcon = NSTextField(labelWithString: "\u{1F3BC}") // 🎼
-        titleIcon.font = .systemFont(ofSize: 15)
-        titleIcon.setContentHuggingPriority(.required, for: .horizontal)
-        titleIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // Now playing ------------------------------------------------------
+        let nowIcon = NSImageView()
+        nowIcon.image = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+        nowIcon.contentTintColor = .tertiaryLabelColor
+        nowIcon.setContentHuggingPriority(.required, for: .horizontal)
 
         trackLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         trackLabel.lineBreakMode = .byTruncatingTail
@@ -67,25 +67,26 @@ final class PopoverViewController: NSViewController {
         artistLabel.lineBreakMode = .byTruncatingTail
         artistLabel.maximumNumberOfLines = 1
 
-        let titleRow = NSStackView(views: [titleIcon, trackLabel])
+        let titleRow = NSStackView(views: [nowIcon, trackLabel])
         titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.spacing = 5
+        titleRow.alignment = .firstBaseline
+        titleRow.spacing = 6
         let nowRow = NSStackView(views: [titleRow, artistLabel])
         nowRow.orientation = .vertical
         nowRow.alignment = .leading
-        nowRow.spacing = 1
+        nowRow.spacing = 2
 
-        // Transpose control (matches mockup) --------------------------------
+        // Transpose --------------------------------------------------------
         let transposeTitle = NSTextField(labelWithString: "Transpose")
-        transposeTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        transposeTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        transposeTitle.textColor = .secondaryLabelColor
 
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .semibold)
         valueLabel.alignment = .center
 
         resetButton.image = NSImage(systemSymbolName: "arrow.counterclockwise",
                                     accessibilityDescription: "Reset")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
         resetButton.imagePosition = .imageOnly
         resetButton.isBordered = false
         resetButton.focusRingType = .none
@@ -93,25 +94,25 @@ final class PopoverViewController: NSViewController {
         resetButton.target = self
         resetButton.action = #selector(resetTapped)
 
-        // Top row: title (leading) · value (true-centered) · reset (trailing).
-        let topRow = NSView()
+        let header = NSView()
         for sub in [transposeTitle, valueLabel, resetButton] {
             sub.translatesAutoresizingMaskIntoConstraints = false
-            topRow.addSubview(sub)
+            header.addSubview(sub)
         }
         NSLayoutConstraint.activate([
-            topRow.heightAnchor.constraint(equalToConstant: 22),
-            transposeTitle.leadingAnchor.constraint(equalTo: topRow.leadingAnchor),
-            transposeTitle.centerYAnchor.constraint(equalTo: topRow.centerYAnchor),
-            valueLabel.centerXAnchor.constraint(equalTo: topRow.centerXAnchor),
-            valueLabel.centerYAnchor.constraint(equalTo: topRow.centerYAnchor),
-            resetButton.trailingAnchor.constraint(equalTo: topRow.trailingAnchor),
-            resetButton.centerYAnchor.constraint(equalTo: topRow.centerYAnchor),
+            header.heightAnchor.constraint(equalToConstant: 20),
+            transposeTitle.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            transposeTitle.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            valueLabel.centerXAnchor.constraint(equalTo: header.centerXAnchor),
+            valueLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            resetButton.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            resetButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            resetButton.widthAnchor.constraint(equalToConstant: 22),
+            resetButton.heightAnchor.constraint(equalToConstant: 20),
         ])
 
-        // Bottom row: − · slider · +
-        let minus = iconButton("minus", 15, #selector(minusTapped))
-        let plus = iconButton("plus", 15, #selector(plusTapped))
+        let minus = stepButton("minus", #selector(minusTapped))
+        let plus = stepButton("plus", #selector(plusTapped))
         slider.cell = TransposeSliderCell()
         slider.minValue = -12
         slider.maxValue = 12
@@ -122,55 +123,50 @@ final class PopoverViewController: NSViewController {
         slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
         slider.heightAnchor.constraint(equalToConstant: 20).isActive = true
 
-        let bottomRow = NSStackView(views: [minus, slider, plus])
-        bottomRow.orientation = .horizontal
-        bottomRow.alignment = .centerY
-        bottomRow.spacing = 12
+        let sliderRow = NSStackView(views: [minus, slider, plus])
+        sliderRow.orientation = .horizontal
+        sliderRow.alignment = .centerY
+        sliderRow.spacing = 10
 
-        // Karaoke -----------------------------------------------------------
-        karaokeSwitch.target = self
-        karaokeSwitch.action = #selector(karaokeToggled)
-        let karaokeLabel = NSTextField(labelWithString: "Reduce vocals (karaoke)")
-        karaokeLabel.font = .systemFont(ofSize: 12)
-        let karaokeRow = NSStackView(views: [karaokeLabel, NSView(), karaokeSwitch])
-        karaokeRow.orientation = .horizontal
-        karaokeRow.distribution = .fill
-        karaokeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let karaokeCaption = NSTextField(labelWithString: "Experimental \u{00B7} best on stereo tracks")
-        karaokeCaption.font = .systemFont(ofSize: 10)
-        karaokeCaption.textColor = .tertiaryLabelColor
+        // Toggles ----------------------------------------------------------
+        configure(karaokeSwitch, #selector(karaokeToggled))
+        configure(rememberSwitch, #selector(rememberToggled))
+        configure(loginSwitch, #selector(loginToggled))
+        let karaokeRow = toggleRow("Reduce vocals", karaokeSwitch,
+                                   tooltip: "Karaoke-style center-channel reduction. Experimental — best on stereo tracks.")
+        let rememberRow = toggleRow("Remember this key", rememberSwitch,
+                                    tooltip: "Re-apply this transpose automatically next time the song plays.")
+        let loginRow = toggleRow("Launch at login", loginSwitch, tooltip: nil)
 
-        // Options -----------------------------------------------------------
-        rememberCheck.target = self
-        rememberCheck.action = #selector(rememberToggled)
-        loginCheck.target = self
-        loginCheck.action = #selector(loginToggled)
-        for box in [rememberCheck, loginCheck] { box.font = .systemFont(ofSize: 12) }
-
+        // Footer -----------------------------------------------------------
         let quit = NSButton(title: "Quit", target: self, action: #selector(quitTapped))
-        quit.bezelStyle = .inline
-        quit.controlSize = .small
+        quit.isBordered = false
+        quit.focusRingType = .none
+        quit.contentTintColor = .secondaryLabelColor
+        quit.font = .systemFont(ofSize: 12)
         let footer = NSStackView(views: [NSView(), quit])
         footer.orientation = .horizontal
 
-        // Assemble ----------------------------------------------------------
+        // Assemble ---------------------------------------------------------
+        let divider1 = separator()
+        let divider2 = separator()
         let stack = NSStackView(views: [
-            nowRow, separator(),
-            topRow, bottomRow, separator(),
-            karaokeRow, karaokeCaption, separator(),
-            rememberCheck, loginCheck, separator(),
-            footer,
+            nowRow, divider1,
+            header, sliderRow,
+            karaokeRow, rememberRow, loginRow,
+            divider2, footer,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        stack.spacing = 11
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.setHuggingPriority(.defaultHigh, for: .vertical)
-
-        for v in [nowRow, topRow, bottomRow, karaokeRow, footer] {
-            v.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        }
+        stack.setCustomSpacing(14, after: nowRow)
+        stack.setCustomSpacing(14, after: divider1)
+        stack.setCustomSpacing(8, after: header)
+        stack.setCustomSpacing(18, after: sliderRow)
+        stack.setCustomSpacing(14, after: loginRow)
+        stack.setCustomSpacing(9, after: divider2)
 
         let container = NSView()
         container.addSubview(stack)
@@ -181,12 +177,12 @@ final class PopoverViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        for spanning in [nowRow, topRow, bottomRow, karaokeRow, footer] {
-            spanning.widthAnchor.constraint(equalTo: stack.widthAnchor,
-                                            constant: -32).isActive = true
+        let fullWidth = [nowRow, divider1, header, sliderRow, karaokeRow, rememberRow,
+                         loginRow, divider2, footer]
+        for v in fullWidth {
+            v.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
-        // Fill the now-playing width so the title/artist truncate instead of
-        // overflowing.
         titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         view = container
@@ -198,8 +194,6 @@ final class PopoverViewController: NSViewController {
     }
 
     func refresh() {
-        // Now playing (also surfaces a permission alert here, since there's no
-        // longer a bottom status line).
         if case .error(let message) = controller.mode {
             trackLabel.stringValue = "Microphone access needed"
             trackLabel.textColor = .systemRed
@@ -221,31 +215,53 @@ final class PopoverViewController: NSViewController {
 
         let s = controller.semitones
         valueLabel.stringValue = s == 0 ? "0" : (s > 0 ? "+\(s)" : "\u{2212}\(abs(s))")
+        valueLabel.textColor = s == 0 ? .labelColor : transposeAccent
         slider.integerValue = s
-        let shifted = (s != 0)
-        resetButton.isEnabled = shifted
-        resetButton.alphaValue = shifted ? 1 : 0.35
+        resetButton.isEnabled = (s != 0)
+        resetButton.alphaValue = (s != 0) ? 1 : 0
 
         karaokeSwitch.state = controller.karaoke ? .on : .off
-        rememberCheck.state = controller.rememberThisSong ? .on : .off
-        rememberCheck.isEnabled = (spotify.current != nil)
-        loginCheck.state = LoginItem.isEnabled ? .on : .off
+        rememberSwitch.state = controller.rememberThisSong ? .on : .off
+        rememberSwitch.isEnabled = (spotify.current != nil)
+        loginSwitch.state = LoginItem.isEnabled ? .on : .off
     }
 
-    private func iconButton(_ symbol: String, _ pointSize: CGFloat, _ action: Selector) -> NSButton {
+    // MARK: - Builders
+
+    private func configure(_ toggle: NSSwitch, _ action: Selector) {
+        toggle.controlSize = .small
+        toggle.target = self
+        toggle.action = action
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    private func toggleRow(_ title: String, _ control: NSView, tooltip: String?) -> NSStackView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 13)
+        label.toolTip = tooltip
+        label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let row = NSStackView(views: [label, spacer, control])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        return row
+    }
+
+    private func stepButton(_ symbol: String, _ action: Selector) -> NSButton {
         let button = NSButton()
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: pointSize, weight: .regular))
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.focusRingType = .none
         button.contentTintColor = .secondaryLabelColor
         button.target = self
         button.action = action
-        // Larger clickable target than the glyph itself; icon stays centered.
         button.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         button.widthAnchor.constraint(equalToConstant: 40).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
         return button
     }
 
@@ -260,14 +276,14 @@ final class PopoverViewController: NSViewController {
     @objc private func resetTapped() { controller.resetPitch() }
     @objc private func sliderChanged() {
         let value = slider.integerValue
-        slider.integerValue = value // snap thumb to whole semitones
+        slider.integerValue = value
         controller.setSemitones(value)
     }
     @objc private func karaokeToggled() { controller.setKaraoke(karaokeSwitch.state == .on) }
-    @objc private func rememberToggled() { controller.setRemember(rememberCheck.state == .on) }
+    @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
     @objc private func loginToggled() {
-        LoginItem.set(loginCheck.state == .on)
-        loginCheck.state = LoginItem.isEnabled ? .on : .off
+        LoginItem.set(loginSwitch.state == .on)
+        loginSwitch.state = LoginItem.isEnabled ? .on : .off
     }
     @objc private func quitTapped() { NSApp.terminate(nil) }
 }

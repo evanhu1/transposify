@@ -79,6 +79,13 @@ final class SpotifyState {
         current = TrackInfo(id: parts[1], name: parts[2], artist: parts[3])
     }
 
+    /// Snapshot/testing only: present a fixed now-playing track.
+    func injectSnapshotTrack(name: String, artist: String) {
+        isRunning = true
+        isPlaying = true
+        current = TrackInfo(id: "snapshot", name: name, artist: artist)
+    }
+
     private func runAppleScript(_ source: String) -> String? {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)

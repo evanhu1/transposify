@@ -145,6 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Debug-only: render the popover to a PNG (dark appearance) and exit.
     private func snapshotPopover(to path: String) {
         controller.testHooks = (engage: { _, _ in }, disengage: { })
+        spotify.injectSnapshotTrack(name: "Human Nature", artist: "Michael Jackson")
         controller.spotifyUpdate(running: true, playing: true, trackID: "snapshot")
         controller.setSemitones(2)
 
