@@ -1,0 +1,7 @@
+# Build output
+.build/
+.swiftpm/
+/Transposer.app/
+
+# macOS
+.DS_Store
