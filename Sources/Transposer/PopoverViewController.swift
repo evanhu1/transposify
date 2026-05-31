@@ -134,7 +134,7 @@ final class PopoverViewController: NSViewController {
         configure(loginSwitch, #selector(loginToggled))
         let karaokeRow = toggleRow("Reduce vocals", karaokeSwitch,
                                    tooltip: "Karaoke-style center-channel reduction. Experimental — best on stereo tracks.")
-        let rememberRow = toggleRow("Remember this key", rememberSwitch,
+        let rememberRow = toggleRow("Remember key for this song", rememberSwitch,
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
         let loginRow = toggleRow("Launch at login", loginSwitch, tooltip: nil)
 
