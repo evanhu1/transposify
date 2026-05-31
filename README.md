@@ -83,16 +83,6 @@ Spotify ─► Core Audio process tap (muted-when-tapped) ─► ring buffer
 - **Now playing / per-song memory**: read from Spotify's `PlaybackStateChanged`
   distributed notification (instant, no polling), keyed by track ID.
 
-## Caveats
-
-- Rubber Band R3 handles the full ±12 range well; very large shifts still thin
-  out musically (physics, not the algorithm). Engaging adds startup latency (the
-  music begins a fraction of a second after you hit a non-zero key).
-- Karaoke vocal-reduce is approximate — it can't fully remove vocals and thins
-  centered bass; it's a starting-point prototype.
-- Capture and output run on independent clocks; the ring buffer self-heals tiny
-  drift, so very long sessions may have rare sub-millisecond glitches.
-
 ## Diagnostics & tests
 
 ```sh
