@@ -5,7 +5,9 @@ range** — shift the key up or down by semitones in real time, pitch without
 tempo change. It stays out of the way: a small `𝄞 +2` / `𝄞 −3` / `𝄞 0` in the
 menu bar, and a popup when you click it. Settings are remembered per song.
 
-<!-- Add a screenshot here: docs/popover.png -->
+<p align="center">
+  <img src="docs/popover.png" alt="Spotify Transposer popover" width="320">
+</p>
 
 ## Install
 
