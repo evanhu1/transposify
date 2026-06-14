@@ -24,7 +24,20 @@ final class AudioController {
     private(set) var rememberThisSong = true
     private(set) var engaged = false
 
+    /// Global on/off. When off, the pipeline never engages and Spotify plays
+    /// untouched — lets you just listen without quitting. Persisted across launches.
+    private(set) var enabled: Bool
+
     var onChange: (() -> Void)?
+
+    private static let enabledKey = "globalEnabled"
+
+    init() {
+        let defaults = UserDefaults.standard
+        enabled = defaults.object(forKey: Self.enabledKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.enabledKey)
+    }
 
     private var currentTrackID: String?
     private var hasTrack = false
@@ -95,6 +108,14 @@ final class AudioController {
         onChange?()
     }
 
+    func setEnabled(_ on: Bool) {
+        guard on != enabled else { return }
+        enabled = on
+        UserDefaults.standard.set(on, forKey: Self.enabledKey)
+        updateEngagement()
+        onChange?()
+    }
+
     func setRemember(_ on: Bool) {
         rememberThisSong = on
         if let id = currentTrackID {
@@ -130,7 +151,7 @@ final class AudioController {
     // MARK: - Engagement
 
     private var shouldEngage: Bool {
-        spotifyRunning && spotifyPlaying && hasTrack && (semitones != 0 || karaoke)
+        enabled && spotifyRunning && spotifyPlaying && hasTrack && (semitones != 0 || karaoke)
     }
 
     private func updateEngagement() {
@@ -221,6 +242,7 @@ final class AudioController {
                 + "\u{25B8} Privacy & Security \u{25B8} Microphone, then reopen.")
         }
         if !spotifyRunning { return .notRunning }
+        if !enabled { return spotifyPlaying ? .original : .paused }
         if (semitones != 0 || karaoke), !engaged, let error = lastError, spotifyPlaying {
             return .error(error)
         }

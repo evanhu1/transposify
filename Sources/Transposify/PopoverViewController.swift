@@ -36,9 +36,15 @@ final class PopoverViewController: NSViewController {
     private let valueLabel = NSTextField(labelWithString: "0")
     private let slider = NSSlider()
     private let resetButton = NSButton()
+    private let powerButton = NSButton()
     private let karaokeSwitch = NSSwitch()
     private let rememberSwitch = NSSwitch()
     private let loginSwitch = NSSwitch()
+    private var minusButton: NSButton!
+    private var plusButton: NSButton!
+
+    /// Rows greyed out (and disabled) while the app is switched off.
+    private var inactiveWhenOff: [NSView] = []
 
     init(controller: AudioController, spotify: SpotifyState) {
         self.controller = controller
@@ -75,6 +81,26 @@ final class PopoverViewController: NSViewController {
         nowRow.orientation = .vertical
         nowRow.alignment = .leading
         nowRow.spacing = 2
+
+        // Global on/off — disengages the whole pipeline so you can just listen.
+        powerButton.image = NSImage(systemSymbolName: "power",
+                                    accessibilityDescription: "Enable transposing")?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+        powerButton.imagePosition = .imageOnly
+        powerButton.isBordered = false
+        powerButton.focusRingType = .none
+        powerButton.target = self
+        powerButton.action = #selector(powerToggled)
+        powerButton.setContentHuggingPriority(.required, for: .horizontal)
+        powerButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        powerButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
+
+        let nowSpacer = NSView()
+        nowSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let nowHeader = NSStackView(views: [nowRow, nowSpacer, powerButton])
+        nowHeader.orientation = .horizontal
+        nowHeader.alignment = .centerY
+        nowHeader.spacing = 8
 
         // Transpose --------------------------------------------------------
         let transposeTitle = NSTextField(labelWithString: "Transpose")
@@ -113,6 +139,8 @@ final class PopoverViewController: NSViewController {
 
         let minus = stepButton("minus", #selector(minusTapped))
         let plus = stepButton("plus", #selector(plusTapped))
+        minusButton = minus
+        plusButton = plus
         slider.cell = TransposeSliderCell()
         slider.minValue = -12
         slider.maxValue = 12
@@ -151,7 +179,7 @@ final class PopoverViewController: NSViewController {
         let divider1 = separator()
         let divider2 = separator()
         let stack = NSStackView(views: [
-            nowRow, divider1,
+            nowHeader, divider1,
             header, sliderRow,
             karaokeRow, rememberRow, loginRow,
             divider2, footer,
@@ -161,7 +189,7 @@ final class PopoverViewController: NSViewController {
         stack.spacing = 11
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.setCustomSpacing(14, after: nowRow)
+        stack.setCustomSpacing(14, after: nowHeader)
         stack.setCustomSpacing(14, after: divider1)
         stack.setCustomSpacing(8, after: header)
         stack.setCustomSpacing(18, after: sliderRow)
@@ -177,14 +205,16 @@ final class PopoverViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        let fullWidth = [nowRow, divider1, header, sliderRow, karaokeRow, rememberRow,
+        let fullWidth = [nowHeader, divider1, header, sliderRow, karaokeRow, rememberRow,
                          loginRow, divider2, footer]
         for v in fullWidth {
             v.setContentHuggingPriority(.defaultLow, for: .horizontal)
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
+        nowRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
+        inactiveWhenOff = [header, sliderRow, karaokeRow]
         view = container
     }
 
@@ -194,6 +224,9 @@ final class PopoverViewController: NSViewController {
     }
 
     func refresh() {
+        // May be called (e.g. from togglePopover) before the view is loaded;
+        // the controls are nil until loadView runs. viewDidLoad refreshes again.
+        guard isViewLoaded else { return }
         if case .error(let message) = controller.mode {
             trackLabel.stringValue = "Microphone access needed"
             trackLabel.textColor = .systemRed
@@ -224,6 +257,18 @@ final class PopoverViewController: NSViewController {
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = (spotify.current != nil)
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
+
+        let on = controller.enabled
+        powerButton.contentTintColor = on ? transposeAccent : .tertiaryLabelColor
+        powerButton.toolTip = on
+            ? "Transposing is on \u{2014} click to just listen"
+            : "Transposing is off \u{2014} click to enable"
+        for row in inactiveWhenOff { row.alphaValue = on ? 1 : 0.4 }
+        for control in [slider, minusButton, plusButton, resetButton, karaokeSwitch] as [NSControl] {
+            control.isEnabled = on
+        }
+        // resetButton still hides itself at 0 even when enabled.
+        if on { resetButton.isEnabled = (controller.semitones != 0) }
     }
 
     // MARK: - Builders
@@ -279,6 +324,7 @@ final class PopoverViewController: NSViewController {
         slider.integerValue = value
         controller.setSemitones(value)
     }
+    @objc private func powerToggled() { controller.setEnabled(!controller.enabled) }
     @objc private func karaokeToggled() { controller.setKaraoke(karaokeSwitch.state == .on) }
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
     @objc private func loginToggled() {
