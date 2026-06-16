@@ -2,10 +2,9 @@ import Foundation
 
 struct SongSetting: Codable, Equatable {
     var semitones: Int
-    var karaoke: Bool
 }
 
-/// Persists per-track transpose/karaoke settings keyed by Spotify track ID.
+/// Persists per-track transpose settings keyed by Spotify track ID.
 final class SongSettingsStore {
     private let defaultsKey = "songSettings.v1"
     private var map: [String: SongSetting]

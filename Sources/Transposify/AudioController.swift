@@ -8,7 +8,8 @@ let log = Logger(subsystem: "com.evanhu.transposify", category: "audio")
 /// Core rule: the tap is engaged **only** while Spotify is playing AND there's
 /// something to do (`semitones != 0` or karaoke on). At 0 with karaoke off the
 /// pipeline is fully torn down, so Spotify plays untouched, bit-perfect, with
-/// zero added latency. Settings are remembered per Spotify track.
+/// zero added latency. Transpose is remembered per Spotify track; reduce-vocals
+/// is a global preference.
 final class AudioController {
     enum Mode: Equatable {
         case shifting(Int)
@@ -20,7 +21,6 @@ final class AudioController {
     }
 
     private(set) var semitones = 0
-    private(set) var karaoke = false
     private(set) var rememberThisSong = true
     private(set) var engaged = false
 
@@ -28,15 +28,21 @@ final class AudioController {
     /// untouched — lets you just listen without quitting. Persisted across launches.
     private(set) var enabled: Bool
 
+    /// Karaoke (reduce vocals) is a global preference, not per-song: it applies
+    /// to whatever is playing and persists across launches.
+    private(set) var karaoke: Bool
+
     var onChange: (() -> Void)?
 
     private static let enabledKey = "globalEnabled"
+    private static let karaokeKey = "globalKaraoke"
 
     init() {
         let defaults = UserDefaults.standard
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
+        karaoke = defaults.bool(forKey: Self.karaokeKey)
     }
 
     private var currentTrackID: String?
@@ -74,14 +80,11 @@ final class AudioController {
     private func loadSettingForCurrentTrack() {
         if let id = currentTrackID, let saved = store.setting(for: id) {
             semitones = saved.semitones
-            karaoke = saved.karaoke
         } else {
             semitones = 0
-            karaoke = false
         }
         rememberThisSong = true
         engine?.semitones = semitones
-        engine?.karaoke = karaoke
     }
 
     // MARK: - User actions
@@ -103,7 +106,7 @@ final class AudioController {
         guard on != karaoke else { return }
         karaoke = on
         engine?.karaoke = on
-        persistIfRemembering()
+        UserDefaults.standard.set(on, forKey: Self.karaokeKey)
         updateEngagement()
         onChange?()
     }
@@ -141,10 +144,10 @@ final class AudioController {
 
     private func persistIfRemembering() {
         guard rememberThisSong, let id = currentTrackID else { return }
-        if semitones == 0 && !karaoke {
+        if semitones == 0 {
             store.remove(for: id) // don't keep a no-op entry
         } else {
-            store.save(SongSetting(semitones: semitones, karaoke: karaoke), for: id)
+            store.save(SongSetting(semitones: semitones), for: id)
         }
     }
 
