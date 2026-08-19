@@ -22,6 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_ICON_SNAPSHOT"] {
+            Self.snapshotIcon(to: path)
+            return
+        }
+
         if ProcessInfo.processInfo.environment["TRANSPOSIFY_RBTEST"] == "1" {
             RubberBandTest.run()
             return
@@ -130,24 +135,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown { popoverVC.refresh() }
     }
 
-    /// A treble clef (𝄞, U+1D11E) as a template image. There's no SF Symbol
-    /// for it, so we render the glyph from whichever installed font has it.
+    /// A treble clef (𝄞, U+1D11E) as a template image, scaled so the glyph's
+    /// ink fills the menu bar instead of floating inside the font's line box.
+    ///
+    /// There's no SF Symbol for a treble clef, so the glyph comes from whichever
+    /// installed font has it. Sizing it is the fiddly part: typographic metrics
+    /// (`NSAttributedString.size()`) describe the whole font — ascent, descent
+    /// and leading — not this glyph, and a clef doesn't fill that box. Measuring
+    /// the glyph path bounds instead lets the drawn ink run edge to edge.
     private static func trebleClefImage() -> NSImage {
         let clef = "\u{1D11E}"
-        let base = NSFont.systemFont(ofSize: NSFont.systemFontSize + 3)
-        let font = CTFontCreateForString(
-            base, clef as CFString,
-            CFRange(location: 0, length: (clef as NSString).length)) as NSFont
-        let attributed = NSAttributedString(string: clef,
-                                            attributes: [.font: font, .foregroundColor: NSColor.black])
-        let size = attributed.size()
-        let imageSize = NSSize(width: max(1, ceil(size.width)) + 2, height: max(1, ceil(size.height)))
-        let image = NSImage(size: imageSize)
+        // Leave a hairline top and bottom so the clef doesn't touch the edges.
+        let targetHeight = max(12, NSStatusBar.system.thickness - 4)
+
+        func measure(at pointSize: CGFloat) -> (line: CTLine, ink: CGRect) {
+            let base = NSFont.systemFont(ofSize: pointSize)
+            let font = CTFontCreateForString(
+                base, clef as CFString,
+                CFRange(location: 0, length: (clef as NSString).length)) as NSFont
+            let attributed = NSAttributedString(
+                string: clef, attributes: [.font: font, .foregroundColor: NSColor.black])
+            let line = CTLineCreateWithAttributedString(attributed)
+            return (line, CTLineGetBoundsWithOptions(line, .useGlyphPathBounds))
+        }
+
+        // Measure large, then pick the point size whose ink is exactly the
+        // height we want. One rescale is enough: glyph outlines scale linearly.
+        let probe = measure(at: 100)
+        guard probe.ink.height > 0 else { return NSImage(size: NSSize(width: 1, height: 1)) }
+        let (line, ink) = measure(at: 100 * targetHeight / probe.ink.height)
+
+        let padding: CGFloat = 1   // breathing room before the semitone value
+        let size = NSSize(width: max(1, ceil(ink.width + 2 * padding)),
+                          height: max(1, ceil(ink.height)))
+        let image = NSImage(size: size)
         image.lockFocus()
-        attributed.draw(at: NSPoint(x: (imageSize.width - size.width) / 2, y: 0))
+        if let context = NSGraphicsContext.current?.cgContext {
+            // Shift the ink's own origin to (0, 0) so it sits flush.
+            context.textPosition = CGPoint(x: padding - ink.minX, y: -ink.minY)
+            CTLineDraw(line, context)
+        }
         image.unlockFocus()
         image.isTemplate = true
         return image
+    }
+
+    /// Debug-only: render the menu-bar icon inside a mock status bar so the
+    /// glyph's fit (and any leftover margin) is visible. Magnified 8x.
+    private static func snapshotIcon(to path: String) {
+        let icon = trebleClefImage()
+        let bar = NSStatusBar.system.thickness
+        let scale: CGFloat = 8
+        let size = NSSize(width: icon.size.width * scale, height: bar * scale)
+
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor(calibratedWhite: 0.85, alpha: 1).setFill()
+        NSRect(origin: .zero, size: size).fill()
+        // Guide lines at the status bar's top and bottom edges.
+        NSColor.systemRed.withAlphaComponent(0.5).setFill()
+        NSRect(x: 0, y: 0, width: size.width, height: 1).fill()
+        NSRect(x: 0, y: size.height - 1, width: size.width, height: 1).fill()
+
+        NSColor.black.setFill()
+        let target = NSRect(x: 0, y: (bar - icon.size.height) / 2 * scale,
+                            width: icon.size.width * scale,
+                            height: icon.size.height * scale)
+        icon.draw(in: target)
+        image.unlockFocus()
+
+        if let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: path))
+        }
+        FileHandle.standardError.write("""
+            icon \(icon.size.width) x \(icon.size.height) pt, status bar \(bar) pt\n
+            """.data(using: .utf8)!)
+        exit(0)
     }
 
     /// Debug-only: render the popover to a PNG (dark appearance) and exit.
