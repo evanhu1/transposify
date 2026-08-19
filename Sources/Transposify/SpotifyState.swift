@@ -64,13 +64,16 @@ final class SpotifyState {
 
     private func queryInitialState() {
         guard isRunning else { return }
+        // Variable names matter here: `st` is reserved and makes the whole
+        // script fail to compile, which silently left the initial snapshot
+        // empty until the next play/pause notification arrived.
         guard let out = runAppleScript("""
         tell application "Spotify"
-            set st to (player state) as text
-            set tid to (id of current track) as text
-            set tnm to (name of current track) as text
-            set tar to (artist of current track) as text
-            return st & "\u{0001}" & tid & "\u{0001}" & tnm & "\u{0001}" & tar
+            set playerState to (player state) as text
+            set trackID to (id of current track) as text
+            set trackName to (name of current track) as text
+            set trackArtist to (artist of current track) as text
+            return playerState & "\u{0001}" & trackID & "\u{0001}" & trackName & "\u{0001}" & trackArtist
         end tell
         """) else { return }
         let parts = out.components(separatedBy: "\u{0001}")
@@ -89,6 +92,13 @@ final class SpotifyState {
     private func runAppleScript(_ source: String) -> String? {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
-        return error == nil ? result?.stringValue : nil
+        if let error {
+            // Usually a missing Automation grant (System Settings ▸ Privacy &
+            // Security ▸ Automation). Playback notifications still work, so the
+            // app recovers as soon as the user next plays or pauses.
+            log.error("Spotify query failed: \(error, privacy: .public)")
+            return nil
+        }
+        return result?.stringValue
     }
 }
