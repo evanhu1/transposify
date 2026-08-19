@@ -255,7 +255,10 @@ final class PopoverViewController: NSViewController {
         } else if spotify.isRunning, let track = spotify.current, !track.name.isEmpty {
             trackLabel.stringValue = track.name
             trackLabel.textColor = .labelColor
-            artistLabel.stringValue = track.artist
+            // The neural pipeline needs ~2 s of audio before its first output;
+            // without a hint that silence reads as "broken".
+            artistLabel.stringValue = controller.priming
+                ? "Catching up\u{2026}" : track.artist
             artistLabel.isHidden = false
             artistLabel.toolTip = nil
         } else {

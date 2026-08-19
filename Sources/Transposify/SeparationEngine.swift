@@ -13,6 +13,14 @@ private final class Flag: @unchecked Sendable {
     func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
 }
 
+/// Monotonic frame counter written by the worker, read from the main thread.
+private final class Counter: @unchecked Sendable {
+    private var value = 0
+    private let lock = NSLock()
+    func add(_ n: Int) { lock.lock(); value += n; lock.unlock() }
+    func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 /// Neural vocal removal. Drains the capture ring, runs HTDemucs over a sliding
 /// 7.8 s window through Core ML, and republishes an instrumental-only stream in
 /// the *same* format it consumed — interleaved floats at the capture rate — so
@@ -99,6 +107,10 @@ final class SeparationEngine {
     private var thread: Thread?
     private let shouldRun = Flag(false)
     private let exited = DispatchSemaphore(value: 0)
+    private let gate = Flag(true)
+    private let finalDrainPending = Flag(false)
+    private let stagedCounter = Counter()
+    private let publishedCounter = Counter()
 
     // Worker-thread state.
     private var stagingL: [Float] = []
@@ -113,6 +125,27 @@ final class SeparationEngine {
     private let failureBox = FailureBox()
 
     var failure: String? { failureBox.get() }
+
+    // MARK: - Transport support
+
+    /// Open while Spotify is playing. Closing schedules one final staging pass
+    /// so audio captured *before* the pause — still sitting in the capture ring
+    /// — is kept; everything after it is discarded.
+    func setInputGate(open: Bool) {
+        if !open && gate.get() { finalDrainPending.set(true) }
+        gate.set(open)
+    }
+
+    /// Total capture-rate frames staged so far. A track boundary "enters" the
+    /// pipeline at this position.
+    var stagedCaptureFrames: Int { stagedCounter.get() }
+
+    /// Capture-rate frames actually handed to the render side: published minus
+    /// what still waits in the output ring. A boundary recorded at
+    /// `stagedCaptureFrames` has been *heard* once this counter passes it.
+    var consumedCaptureFrames: Int {
+        publishedCounter.get() - outputRing.availableToRead / channels
+    }
 
     final class FailureBox: @unchecked Sendable {
         private var value: String?
@@ -143,8 +176,10 @@ final class SeparationEngine {
         precondition(hopFrames + lookaheadFrames < Self.windowFrames,
                      "hop + lookahead must leave room for past context")
 
-        // ~3 s of slack so a late prediction never starves the render thread.
-        outputRing = RingBuffer(capacityFloats: Int(captureRate * 3.0) * self.channels)
+        // Sized for the pause case: while the output is held nothing drains,
+        // and the worker parks up to ~3 s of finished audio here (the rest
+        // waits in staging, paced by `stepIfReady`). 4 s never overflows.
+        outputRing = RingBuffer(capacityFloats: Int(captureRate * 4.0) * self.channels)
 
         inputArray = try MLMultiArray(
             shape: [1, 2, NSNumber(value: Self.windowFrames)], dataType: .float32)
@@ -241,6 +276,20 @@ final class SeparationEngine {
         }
         let frames = got / channels
         guard frames > 0 else { return }
+
+        // Paused: keep consuming the ring so it can't overflow, but discard.
+        // The exception is the first pass after the gate closes, which stages
+        // what was captured *before* the pause and is still in the ring.
+        //
+        // Everything after that is Spotify's own pause fade-out. It is an
+        // artifact of stopping, not song content, and it overlaps audio that
+        // resume will deliver again — so staging it both duplicates ~0.3 s and
+        // pushes the pipeline permanently deeper on every single pause.
+        if !gate.get() {
+            if !finalDrainPending.get() { return }
+            finalDrainPending.set(false)
+        }
+        stagedCounter.add(frames)
         downInBuf.frameLength = AVAudioFrameCount(frames)
         for c in 0..<channels {
             let dst = inChannels[c]
@@ -279,6 +328,12 @@ final class SeparationEngine {
         // from silence. Every later step advances by exactly one hop.
         let needed = primed ? hopFrames : hopFrames + lookaheadFrames
         guard stagingL.count >= needed else { return false }
+
+        // Pace on output-ring room. While the render side is held (pause),
+        // nothing drains; predicting anyway would overflow the ring and DROP
+        // finished audio. Waiting keeps it safe in staging instead.
+        let neededRoom = (Int(Double(hopFrames) * captureRate / Self.modelRate) + 64) * channels
+        guard outputRing.availableToWrite >= neededRoom else { return false }
 
         slideWindow(by: needed)
         stagingL.removeFirst(needed)
@@ -417,5 +472,6 @@ final class SeparationEngine {
             }
             outputRing.write(dst.baseAddress!, count: count)
         }
+        publishedCounter.add(n)
     }
 }

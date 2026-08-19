@@ -13,6 +13,7 @@ private final class AtomicInt: @unchecked Sendable {
 }
 
 private final class IntBox { var value: Int = .min }
+private final class FloatBox { var value: Float = 1 }
 
 /// Drains the capture `RingBuffer` through the Rubber Band Library (R3 "finer"
 /// engine, real-time mode) for state-of-the-art pitch shifting without tempo
@@ -54,6 +55,17 @@ final class PitchEngine {
     }
     var karaoke: Bool = false {
         didSet { karaokeGain.set(karaoke ? 25 : 100) }
+    }
+
+    private let holdFlag = AtomicInt(0)
+
+    /// While held, the render callback outputs silence *without draining the
+    /// ring*, after a 10 ms fade. Everything buffered upstream stays put, so
+    /// releasing the hold resumes the exact sample where it stopped. This is
+    /// what makes pause instant in the delayed (separation) pipeline: pausing
+    /// the delayed stream needs no new audio, just a frozen buffer.
+    var hold: Bool = false {
+        didSet { holdFlag.set(hold ? 1 : 0) }
     }
 
     /// Fired (on main) when the audio route/format changes; controller rebuilds.
@@ -103,10 +115,26 @@ final class PitchEngine {
         let karaokeGain = self.karaokeGain
         let targetSemitones = self.targetSemitones
         let appliedSemitones = IntBox()
+        let holdFlag = self.holdFlag
+        let holdGain = FloatBox()
+        let gainStep = Float(1.0 / (0.010 * sampleRate))   // 10 ms fade
 
         let node = AVAudioSourceNode(format: format) { isSilence, _, frameCount, ablPtr in
             let abl = UnsafeMutableAudioBufferListPointer(ablPtr)
             let frames = Int(frameCount)
+
+            // Fully held: silence, and crucially, do not consume the ring.
+            let holdTarget: Float = holdFlag.get() == 1 ? 0 : 1
+            if holdTarget == 0 && holdGain.value == 0 {
+                for c in 0..<min(ch, abl.count) {
+                    if let dst = abl[c].mData?.assumingMemoryBound(to: Float.self) {
+                        var f = 0
+                        while f < frames { dst[f] = 0; f += 1 }
+                    }
+                }
+                isSilence.pointee = true
+                return noErr
+            }
 
             let semis = targetSemitones.get()
             if semis != appliedSemitones.value {
@@ -167,6 +195,25 @@ final class PitchEngine {
                     }
                 }
                 if toRetrieve == 0 { isSilence.pointee = true }
+            }
+
+            // Ramp toward the hold target so pause/resume never clicks. The
+            // ~10 ms consumed during the fade plays at falling gain.
+            if holdGain.value != holdTarget {
+                var g = holdGain.value
+                for f in 0..<frames {
+                    if g < holdTarget {
+                        g = min(holdTarget, g + gainStep)
+                    } else {
+                        g = max(holdTarget, g - gainStep)
+                    }
+                    for c in 0..<min(ch, abl.count) {
+                        if let dst = abl[c].mData?.assumingMemoryBound(to: Float.self) {
+                            dst[f] *= g
+                        }
+                    }
+                }
+                holdGain.value = g
             }
             return noErr
         }

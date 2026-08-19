@@ -105,6 +105,12 @@ final class AudioController {
     private var disengageWork: DispatchWorkItem?
     private var reconfiguring = false
 
+    /// A track change reaches the ears ~2 s after Spotify reports it (the
+    /// separation pipeline's depth), so the new track's saved transpose must
+    /// wait for its audio. `target` is the staged-frame position of the
+    /// boundary; the watchdog applies `value` once consumption passes it.
+    private var pendingSemitones: (target: Int, value: Int)?
+
     /// When set, engage/disengage drive these stubs instead of real audio —
     /// used by the headless self-test to verify the state machine.
     var testHooks: (engage: (Int, Bool) -> Void, disengage: () -> Void)?
@@ -114,6 +120,7 @@ final class AudioController {
     func spotifyUpdate(running: Bool, playing: Bool, trackID: String?) {
         spotifyRunning = running
         spotifyPlaying = playing
+        separation?.setInputGate(open: running && playing)
         if trackID != currentTrackID {
             currentTrackID = trackID
             hasTrack = trackID != nil
@@ -130,7 +137,15 @@ final class AudioController {
             semitones = 0
         }
         rememberThisSong = true
-        engine?.semitones = semitones
+        // With the separation pipeline running, the previous track is still in
+        // flight; changing the key now would transpose its tail. Defer to the
+        // boundary. The UI shows the new value immediately — that's the intent.
+        if let separation, engaged, separation.failure == nil {
+            pendingSemitones = (separation.stagedCaptureFrames, semitones)
+            log.notice("transpose \(self.semitones, privacy: .public) st deferred to track boundary")
+        } else {
+            engine?.semitones = semitones
+        }
     }
 
     // MARK: - User actions
@@ -138,6 +153,7 @@ final class AudioController {
     func setSemitones(_ value: Int) {
         let clamped = max(-12, min(12, value))
         guard clamped != semitones else { return }
+        pendingSemitones = nil          // the user is taking over: apply now
         semitones = clamped
         engine?.semitones = clamped
         persistIfRemembering()
@@ -219,19 +235,46 @@ final class AudioController {
 
     // MARK: - Engagement
 
-    private var shouldEngage: Bool {
-        guard enabled, spotifyRunning, spotifyPlaying, hasTrack else { return false }
+    /// The pipeline has a reason to exist (regardless of playback state).
+    private var pipelineUseful: Bool {
+        guard enabled, spotifyRunning, hasTrack else { return false }
         guard semitones != 0 || vocalReduction != .off else { return false }
         // The neural path can't start until its model is resident.
         if vocalReduction == .best && modelLoader.model == nil { return false }
         return true
     }
 
+    private var shouldEngage: Bool { pipelineUseful && spotifyPlaying }
+
+    /// Pause with the separation pipeline up: hold, don't tear down. Teardown
+    /// would discard ~2 s of in-flight audio; holding freezes it, so resume
+    /// continues from the exact sample and never re-primes.
+    private var shouldHold: Bool {
+        engaged && separation != nil && pipelineUseful && !spotifyPlaying
+    }
+
     private func updateEngagement() {
         if shouldEngage {
             disengageWork?.cancel()
             disengageWork = nil
-            if !engaged { engage() }
+            if engaged {
+                if let engine, engine.hold {
+                    engine.hold = false
+                    log.notice("hold released\(self.flightDescription(), privacy: .public)")
+                }
+            } else {
+                engage()
+            }
+        } else if shouldHold {
+            disengageWork?.cancel()
+            disengageWork = nil
+            if let engine, !engine.hold {
+                engine.hold = true
+                log.notice("""
+                    held (paused with \(self.vocalReduction.rawValue, privacy: .public) \
+                    pipeline intact)\(self.flightDescription(), privacy: .public)
+                    """)
+            }
         } else {
             scheduleDisengage()
         }
@@ -305,6 +348,18 @@ final class AudioController {
         onChange?()
     }
 
+    /// Frames captured but not yet heard. Across a pause this must stay put:
+    /// a drop between "held" and "hold released" would be audio lost inside
+    /// the song, which is exactly what holding is meant to prevent.
+    private func flightDescription() -> String {
+        guard let separation, capture != nil else { return "" }
+        let staged = separation.stagedCaptureFrames
+        let consumed = separation.consumedCaptureFrames
+        let rate = capture?.sampleRate ?? 48_000
+        return String(format: "  [in flight %.2fs, staged %d, consumed %d]",
+                      Double(staged - consumed) / rate, staged, consumed)
+    }
+
     /// Watches the separation worker: clears `priming` once audio is flowing and
     /// surfaces a prediction failure instead of leaving the user in silence.
     private func startSeparationWatchdog() {
@@ -323,6 +378,12 @@ final class AudioController {
             if self.priming && separation.outputRing.availableToRead > 0 {
                 self.priming = false
                 self.onChange?()
+            }
+            if let pending = self.pendingSemitones,
+               separation.consumedCaptureFrames >= pending.target {
+                self.pendingSemitones = nil
+                self.engine?.semitones = pending.value
+                log.notice("deferred transpose \(pending.value, privacy: .public) st applied at track boundary")
             }
         }
         separationWatchdog = timer
@@ -343,6 +404,7 @@ final class AudioController {
         separation?.stop(); separation = nil
         capture?.stop(); capture = nil
         priming = false
+        pendingSemitones = nil   // next engage seeds engine.semitones directly
         engaged = false
         if wasEngaged { log.notice("disengaged (passthrough)") }
         onChange?()
