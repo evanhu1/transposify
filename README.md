@@ -34,6 +34,29 @@ command-line tools (`xcode-select --install` if `swift` isn't found).
 rm -rf /Applications/Transposify.app && tccutil reset Microphone com.evanhu.transposify
 ```
 
+## Vocal removal
+
+`Fast` needs nothing extra. `Best` needs a one-time model install:
+
+```sh
+./install-model.sh
+```
+
+That converts Meta's HTDemucs to Core ML and installs it to
+`~/Library/Application Support/Transposify/`. It takes about ten minutes and
+~256 MB of disk, mostly spent downloading PyTorch and the model weights. Until
+it's installed, `Best` stays greyed out.
+
+**Why the delay.** Separating a moment of audio well needs to see slightly past
+it, so `Best` buffers about a second of lookahead and emits a second at a time —
+roughly two seconds behind Spotify. That is affordable here because you sing
+*along to* the output rather than monitoring yourself through it, but it does
+mean pausing and skipping lag by the same amount. `Fast` has no such delay.
+
+Measured on an M4 Max: one 7.8 s window takes ~130 ms on the GPU, so the model
+runs at about 15x realtime and uses a fraction of the machine. The model is held
+in memory (on the order of a gigabyte) only while `Best` is selected.
+
 ## Using it
 
 Click the menu-bar item to open the popup:
@@ -41,8 +64,11 @@ Click the menu-bar item to open the popup:
 - **Now playing** — current track + artist.
 - **Transpose** — `−` / value / `+`, or the slider (±12 semitones). *Reset*
   (↺) appears when shifted.
-- **Reduce vocals (karaoke)** — experimental center-channel cancellation to duck
-  the original lead vocal; works best on stereo tracks.
+- **Reduce vocals** — `Off` / `Fast` / `Best`.
+  *Fast* is centre-channel cancellation: instant, but it ducks the bass and
+  drums along with the vocal. *Best* runs neural source separation (HTDemucs)
+  and genuinely removes the vocal, at the cost of about two seconds of delay
+  between Spotify and what you hear. See [Vocal removal](#vocal-removal).
 - **Remember key for this song** — on by default; your setting auto-applies when
   that track plays again. New songs start at the original key.
 - **Launch at login** — register as a login item via `SMAppService`.
@@ -62,9 +88,14 @@ your speakers:
 ```
 Spotify ─► Core Audio process tap (muted-when-tapped) ─► ring buffer
                                                               │
-  popup sets semitones ─► [vocal reduce] ─► Rubber Band R3 ◄── source node
-                                                  │
-                                                  └─► default output device
+                              ┌───────────────────────────────┘
+                              ▼
+             [Best]  HTDemucs via Core ML, sliding 7.8 s window ─► ring buffer
+             [Fast]  mid/side centre cancellation (in the render callback)
+                              │
+  popup sets semitones ─► Rubber Band R3 ◄── source node
+                                  │
+                                  └─► default output device
 ```
 
 - **Capture**: a Core Audio *process tap* (`AudioHardwareCreateProcessTap`,

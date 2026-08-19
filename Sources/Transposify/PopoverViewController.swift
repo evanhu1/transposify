@@ -37,7 +37,7 @@ final class PopoverViewController: NSViewController {
     private let slider = NSSlider()
     private let resetButton = NSButton()
     private let powerButton = NSButton()
-    private let karaokeSwitch = NSSwitch()
+    private let vocalPicker = NSSegmentedControl()
     private let rememberSwitch = NSSwitch()
     private let loginSwitch = NSSwitch()
     private var minusButton: NSButton!
@@ -157,11 +157,24 @@ final class PopoverViewController: NSViewController {
         sliderRow.spacing = 10
 
         // Toggles ----------------------------------------------------------
-        configure(karaokeSwitch, #selector(karaokeToggled))
         configure(rememberSwitch, #selector(rememberToggled))
         configure(loginSwitch, #selector(loginToggled))
-        let karaokeRow = toggleRow("Reduce vocals", karaokeSwitch,
-                                   tooltip: "Karaoke-style center-channel reduction. Experimental — best on stereo tracks.")
+
+        vocalPicker.segmentStyle = .rounded
+        vocalPicker.segmentCount = VocalReduction.allCases.count
+        vocalPicker.focusRingType = .none
+        vocalPicker.target = self
+        vocalPicker.action = #selector(vocalReductionChanged)
+        for (i, mode) in VocalReduction.allCases.enumerated() {
+            vocalPicker.setLabel(Self.label(for: mode), forSegment: i)
+            vocalPicker.setWidth(52, forSegment: i)
+        }
+        vocalPicker.setToolTip("Leave the mix untouched.", forSegment: 0)
+        vocalPicker.setToolTip("Centre-channel reduction. Instant, but it ducks "
+            + "the bass and drums along with the vocal.", forSegment: 1)
+        vocalPicker.setToolTip("Neural separation. Genuinely removes the vocal, "
+            + "but the audio trails Spotify by about two seconds.", forSegment: 2)
+        let karaokeRow = pickerRow("Reduce vocals", vocalPicker)
         let rememberRow = toggleRow("Remember key for this song", rememberSwitch,
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
         let loginRow = toggleRow("Launch at login", loginSwitch, tooltip: nil)
@@ -233,6 +246,12 @@ final class PopoverViewController: NSViewController {
             artistLabel.stringValue = "Enable in System Settings \u{25B8} Privacy"
             artistLabel.isHidden = false
             artistLabel.toolTip = message
+        } else if controller.preparingModel {
+            trackLabel.stringValue = "Preparing vocal removal\u{2026}"
+            trackLabel.textColor = .labelColor
+            artistLabel.stringValue = "Loading the model, a few seconds"
+            artistLabel.isHidden = false
+            artistLabel.toolTip = nil
         } else if spotify.isRunning, let track = spotify.current, !track.name.isEmpty {
             trackLabel.stringValue = track.name
             trackLabel.textColor = .labelColor
@@ -253,7 +272,14 @@ final class PopoverViewController: NSViewController {
         resetButton.isEnabled = (s != 0)
         resetButton.alphaValue = (s != 0) ? 1 : 0
 
-        karaokeSwitch.state = controller.karaoke ? .on : .off
+        if let index = VocalReduction.allCases.firstIndex(of: controller.vocalReduction) {
+            vocalPicker.selectedSegment = index
+        }
+        // "Best" needs the model on disk; keep it visible but unselectable so
+        // the capability is discoverable rather than hidden.
+        if let best = VocalReduction.allCases.firstIndex(of: .best) {
+            vocalPicker.setEnabled(SeparationModel.isInstalled, forSegment: best)
+        }
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = (spotify.current != nil)
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
@@ -264,7 +290,7 @@ final class PopoverViewController: NSViewController {
             ? "Transposing is on \u{2014} click to just listen"
             : "Transposing is off \u{2014} click to enable"
         for row in inactiveWhenOff { row.alphaValue = on ? 1 : 0.4 }
-        for control in [slider, minusButton, plusButton, resetButton, karaokeSwitch] as [NSControl] {
+        for control in [slider, minusButton, plusButton, resetButton, vocalPicker] as [NSControl] {
             control.isEnabled = on
         }
         // resetButton still hides itself at 0 even when enabled.
@@ -292,6 +318,21 @@ final class PopoverViewController: NSViewController {
         row.alignment = .centerY
         row.spacing = 8
         return row
+    }
+
+    /// A label plus a segmented control, matching the toggle rows' metrics.
+    private func pickerRow(_ title: String, _ control: NSSegmentedControl) -> NSStackView {
+        control.setContentHuggingPriority(.required, for: .horizontal)
+        return toggleRow(title, control, tooltip:
+            "How much of the original vocal to remove, and how much delay to accept.")
+    }
+
+    static func label(for mode: VocalReduction) -> String {
+        switch mode {
+        case .off: return "Off"
+        case .fast: return "Fast"
+        case .best: return "Best"
+        }
     }
 
     private func stepButton(_ symbol: String, _ action: Selector) -> NSButton {
@@ -325,7 +366,11 @@ final class PopoverViewController: NSViewController {
         controller.setSemitones(value)
     }
     @objc private func powerToggled() { controller.setEnabled(!controller.enabled) }
-    @objc private func karaokeToggled() { controller.setKaraoke(karaokeSwitch.state == .on) }
+    @objc private func vocalReductionChanged() {
+        let index = vocalPicker.selectedSegment
+        guard index >= 0, index < VocalReduction.allCases.count else { return }
+        controller.setVocalReduction(VocalReduction.allCases[index])
+    }
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
     @objc private func loginToggled() {
         LoginItem.set(loginSwitch.state == .on)

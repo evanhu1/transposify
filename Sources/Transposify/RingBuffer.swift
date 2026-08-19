@@ -28,6 +28,11 @@ final class RingBuffer: @unchecked Sendable {
         writeIdx.load(ordering: .acquiring) &- readIdx.load(ordering: .relaxed)
     }
 
+    /// Producer-side room, so a feeder can pace itself instead of dropping.
+    var availableToWrite: Int {
+        capacity - (writeIdx.load(ordering: .relaxed) &- readIdx.load(ordering: .acquiring))
+    }
+
     /// Producer side. Drops samples that don't fit rather than blocking.
     func write(_ src: UnsafePointer<Float>, count: Int) {
         let w = writeIdx.load(ordering: .relaxed)

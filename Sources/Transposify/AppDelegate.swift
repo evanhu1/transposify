@@ -71,8 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.spotify.start()
             self?.syncSpotifyToController()
             self?.applyDebugHooks()
+            log.notice("""
+                started: spotify running \(self?.spotify.isRunning == true, privacy: .public) \
+                playing \(self?.spotify.isPlaying == true, privacy: .public)
+                """)
         }
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        log.notice("launched; microphone authorization = \(status.rawValue, privacy: .public)")
+        switch status {
         case .authorized:
             begin()
         case .notDetermined:
@@ -92,7 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyDebugHooks() {
         let env = ProcessInfo.processInfo.environment
         if let v = env["TRANSPOSIFY_DEBUG_PITCH"], let n = Int(v) { controller.setSemitones(n) }
-        if env["TRANSPOSIFY_DEBUG_KARAOKE"] == "1" { controller.setKaraoke(true) }
+        if let v = env["TRANSPOSIFY_DEBUG_VOCALS"], let mode = VocalReduction(rawValue: v) {
+            controller.setVocalReduction(mode)
+        }
         if let q = env["TRANSPOSIFY_DEBUG_QUIT_AFTER"], let secs = Double(q) {
             DispatchQueue.main.asyncAfter(deadline: .now() + secs) { NSApp.terminate(nil) }
         }
