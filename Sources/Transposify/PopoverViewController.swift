@@ -38,6 +38,9 @@ final class PopoverViewController: NSViewController {
     private let resetButton = NSButton()
     private let powerButton = NSButton()
     private let vocalPicker = NSSegmentedControl()
+    private let modelLabel = NSTextField(labelWithString: "")
+    private let modelButton = NSButton()
+    private var modelRow: NSStackView!
     private let rememberSwitch = NSSwitch()
     private let loginSwitch = NSSwitch()
     private var minusButton: NSButton!
@@ -175,6 +178,26 @@ final class PopoverViewController: NSViewController {
         vocalPicker.setToolTip("Neural separation. Genuinely removes the vocal, "
             + "but the audio trails Spotify by about two seconds.", forSegment: 2)
         let karaokeRow = pickerRow("Reduce vocals", vocalPicker)
+
+        // Only shown until the model is on disk (or while it's arriving).
+        modelLabel.font = .systemFont(ofSize: 11)
+        modelLabel.textColor = .secondaryLabelColor
+        modelLabel.lineBreakMode = .byTruncatingTail
+        modelButton.isBordered = false
+        modelButton.focusRingType = .none
+        modelButton.font = .systemFont(ofSize: 11, weight: .medium)
+        modelButton.contentTintColor = transposeAccent
+        modelButton.target = self
+        modelButton.action = #selector(modelButtonTapped)
+        modelButton.setContentHuggingPriority(.required, for: .horizontal)
+        let modelSpacer = NSView()
+        modelSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let modelRow = NSStackView(views: [modelLabel, modelSpacer, modelButton])
+        modelRow.orientation = .horizontal
+        modelRow.alignment = .centerY
+        modelRow.spacing = 8
+        self.modelRow = modelRow
+
         let rememberRow = toggleRow("Remember key for this song", rememberSwitch,
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
         let loginRow = toggleRow("Launch at login", loginSwitch, tooltip: nil)
@@ -194,7 +217,7 @@ final class PopoverViewController: NSViewController {
         let stack = NSStackView(views: [
             nowHeader, divider1,
             header, sliderRow,
-            karaokeRow, rememberRow, loginRow,
+            karaokeRow, modelRow, rememberRow, loginRow,
             divider2, footer,
         ])
         stack.orientation = .vertical
@@ -218,8 +241,8 @@ final class PopoverViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        let fullWidth = [nowHeader, divider1, header, sliderRow, karaokeRow, rememberRow,
-                         loginRow, divider2, footer]
+        let fullWidth = [nowHeader, divider1, header, sliderRow, karaokeRow, modelRow,
+                         rememberRow, loginRow, divider2, footer]
         for v in fullWidth {
             v.setContentHuggingPriority(.defaultLow, for: .horizontal)
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
@@ -283,6 +306,7 @@ final class PopoverViewController: NSViewController {
         if let best = VocalReduction.allCases.firstIndex(of: .best) {
             vocalPicker.setEnabled(SeparationModel.isInstalled, forSegment: best)
         }
+        refreshModelRow()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = (spotify.current != nil)
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
@@ -369,6 +393,55 @@ final class PopoverViewController: NSViewController {
         controller.setSemitones(value)
     }
     @objc private func powerToggled() { controller.setEnabled(!controller.enabled) }
+    /// The model row is the only place "Best" explains itself, so it carries
+    /// the size up front, live progress, and any failure — rather than leaving
+    /// a greyed-out segment with no explanation.
+    private func refreshModelRow() {
+        let installer = controller.modelInstaller
+        switch installer.state {
+        case .downloading(let fraction, let received, let total):
+            modelRow.isHidden = false
+            let mb = { (b: Int64) in String(format: "%.0f", Double(b) / 1_000_000) }
+            modelLabel.stringValue =
+                "Downloading model \u{2014} \(mb(received)) of \(mb(total)) MB"
+            modelLabel.textColor = .secondaryLabelColor
+            modelButton.title = "\(Int(fraction * 100))%  Cancel"
+        case .verifying:
+            modelRow.isHidden = false
+            modelLabel.stringValue = "Checking the download\u{2026}"
+            modelLabel.textColor = .secondaryLabelColor
+            modelButton.title = ""
+        case .installing:
+            modelRow.isHidden = false
+            modelLabel.stringValue = "Installing the model\u{2026}"
+            modelLabel.textColor = .secondaryLabelColor
+            modelButton.title = ""
+        case .failed(let message):
+            modelRow.isHidden = false
+            modelLabel.stringValue = message
+            modelLabel.textColor = .systemRed
+            modelButton.title = "Retry"
+        case .idle, .installed:
+            // Nothing to say once it's on disk.
+            modelRow.isHidden = SeparationModel.isInstalled
+            modelLabel.stringValue =
+                "\u{201C}Best\u{201D} needs a \(SeparationModel.downloadSizeDescription) model"
+            modelLabel.textColor = .secondaryLabelColor
+            modelButton.title = "Download"
+        }
+        modelButton.isHidden = modelButton.title.isEmpty
+        modelLabel.toolTip = "Neural separation runs on your Mac; the model is "
+            + "downloaded once and verified against a checksum."
+    }
+
+    @objc private func modelButtonTapped() {
+        if controller.modelInstaller.isBusy {
+            controller.cancelModelDownload()
+        } else {
+            controller.downloadModel()
+        }
+    }
+
     @objc private func vocalReductionChanged() {
         let index = vocalPicker.selectedSegment
         guard index >= 0, index < VocalReduction.allCases.count else { return }

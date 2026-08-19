@@ -37,9 +37,44 @@ enum SeparationModel {
 
     static var isInstalled: Bool { locate() != nil }
 
+    // MARK: - Release asset
+
+    /// Bumped whenever the converted model changes. The app refuses an archive
+    /// whose hash doesn't match, which pins the model's *geometry* — window
+    /// length and stem order are compiled in, and a mismatched model would
+    /// produce silent garbage rather than an honest failure.
+    static let modelVersion = "model-v1"
+
+    static var downloadURL: URL {
+        // Debug hook: point the installer at a local server to exercise the
+        // download path without hitting the network.
+        if let override = ProcessInfo.processInfo.environment["TRANSPOSIFY_MODEL_URL"],
+           let url = URL(string: override) {
+            return url
+        }
+        return URL(string:
+            "https://github.com/evanhu1/transposify/releases/download/"
+            + "\(modelVersion)/HTDemucs.mlmodelc.zip")!
+    }
+
+    /// SHA-256 of that exact archive, from `./install-model.sh --package`.
+    ///
+    /// Zip embeds timestamps, so packaging the same model twice produces two
+    /// different digests. This must be the hash of the file actually attached
+    /// to the release, not of a later rebuild.
+    static let expectedArchiveSHA256 =
+        "a62bb8abdaeb8738c9cd831b52d3be90fdd2d9f2ba5c2809810aca5750d9b03b"
+
+    static let approximateDownloadBytes = 141_910_700
+
+    static var downloadSizeDescription: String {
+        let mb = Double(approximateDownloadBytes) / 1_000_000
+        return String(format: "%.0f MB", mb)
+    }
+
     static var installHint: String {
-        "Run ./install-model.sh to add the vocal-removal model "
-            + "(~256 MB, downloaded and converted once)."
+        "The vocal-removal model isn't installed. Download it from the popover, "
+            + "or build it from source with ./install-model.sh."
     }
 }
 

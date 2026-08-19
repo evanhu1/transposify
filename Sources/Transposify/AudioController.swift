@@ -82,6 +82,31 @@ final class AudioController {
             self.onChange?()
         }
         if vocalReduction == .best { modelLoader.prepare() }
+
+        modelInstaller.onChange = { [weak self] in
+            guard let self else { return }
+            if case .installed = self.modelInstaller.state, self.wantsBestWhenInstalled {
+                self.wantsBestWhenInstalled = false
+                self.setVocalReduction(.best)
+            }
+            self.onChange?()
+        }
+    }
+
+    /// Downloads the vocal-removal model, then switches to "Best" — the user
+    /// asked for the mode, not for a file.
+    func downloadModel() {
+        guard !SeparationModel.isInstalled else { return }
+        wantsBestWhenInstalled = true
+        lastError = nil
+        modelInstaller.start()
+        onChange?()
+    }
+
+    func cancelModelDownload() {
+        wantsBestWhenInstalled = false
+        modelInstaller.cancel()
+        onChange?()
     }
 
     /// True while the model is still loading and "Best" is selected — the UI
@@ -100,6 +125,8 @@ final class AudioController {
     private var separation: SeparationEngine?
     private var separationWatchdog: DispatchSourceTimer?
     private let modelLoader = SeparationModelLoader()
+    let modelInstaller = SeparationModelInstaller()
+    private var wantsBestWhenInstalled = false
     private let store = SongSettingsStore()
 
     private var disengageWork: DispatchWorkItem?

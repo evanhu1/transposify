@@ -36,16 +36,21 @@ rm -rf /Applications/Transposify.app && tccutil reset Microphone com.evanhu.tran
 
 ## Vocal removal
 
-`Fast` needs nothing extra. `Best` needs a one-time model install:
+`Fast` needs nothing extra. `Best` needs a one-time model download: open the
+popover and click **Download** next to "Best needs a 142 MB model". It lands in
+`~/Library/Application Support/Transposify/` and is checked against a SHA-256
+built into the app, so a corrupted or substituted download is refused rather
+than installed. Until it's there, `Best` stays greyed out.
+
+If you'd rather build the model yourself than trust a binary:
 
 ```sh
 ./install-model.sh
 ```
 
-That converts Meta's HTDemucs to Core ML and installs it to
-`~/Library/Application Support/Transposify/`. It takes about ten minutes and
-~256 MB of disk, mostly spent downloading PyTorch and the model weights. Until
-it's installed, `Best` stays greyed out.
+That converts Meta's HTDemucs to Core ML locally and installs it to the same
+place. It takes about ten minutes, mostly spent downloading PyTorch and the
+model weights.
 
 **Why the delay.** Separating a moment of audio well needs to see slightly past
 it, so `Best` buffers about a second of lookahead and emits a second at a time —

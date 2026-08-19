@@ -1,20 +1,55 @@
 #!/bin/bash
 # Build and install the vocal-removal model for Transposify's "Best" mode.
 #
-# HTDemucs is converted to Core ML once, here, and installed to Application
-# Support. It is ~256 MB compiled, which is why it isn't in the repo or the
-# .app bundle. Takes about ten minutes the first time, mostly downloading
-# PyTorch and the model weights.
+# Most people never need this: the app downloads a prebuilt model from the
+# releases page and verifies its checksum. This script is the reproducible
+# path — build it yourself instead of trusting a binary — and it's how the
+# release artifact is produced.
+#
+#   ./install-model.sh              build and install
+#   ./install-model.sh --force      rebuild even if already installed
+#   ./install-model.sh --package    also produce the release zip + SHA-256
+#
+# Takes about ten minutes the first time, mostly downloading PyTorch and the
+# model weights.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DEST="$HOME/Library/Application Support/Transposify"
 MODEL="$DEST/HTDemucs.mlmodelc"
 WORK=".build/model-conversion"
+RELEASE=".build/model-release"
 
-if [ -d "$MODEL" ] && [ "${1:-}" != "--force" ]; then
+PACKAGE=0
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --package) PACKAGE=1 ;;
+        --force) FORCE=1 ;;
+        *) echo "unknown option: $arg"; exit 2 ;;
+    esac
+done
+
+package_model() {
+    mkdir -p "$RELEASE"
+    rm -f "$RELEASE/HTDemucs.mlmodelc.zip"
+    ( cd "$DEST" && ditto -c -k --sequesterRsrc --keepParent \
+        HTDemucs.mlmodelc "$OLDPWD/$RELEASE/HTDemucs.mlmodelc.zip" )
+    echo
+    echo "==> release artifact"
+    echo "    file:   $RELEASE/HTDemucs.mlmodelc.zip"
+    echo "    bytes:  $(stat -f%z "$RELEASE/HTDemucs.mlmodelc.zip")"
+    echo "    sha256: $(shasum -a 256 "$RELEASE/HTDemucs.mlmodelc.zip" | cut -d' ' -f1)"
+    echo
+    echo "    Attach THIS file to the release named by SeparationModel.modelVersion,"
+    echo "    and paste the bytes and sha256 into SeparationModel.swift."
+    echo "    Note: zip stores timestamps, so re-running this produces a different"
+    echo "    sha256 for an identical model. Upload the file you just hashed."
+}
+
+if [ -d "$MODEL" ] && [ "$FORCE" -eq 0 ]; then
     echo "==> already installed: $MODEL"
-    echo "    re-run with --force to rebuild"
+    [ "$PACKAGE" -eq 1 ] && package_model || echo "    re-run with --force to rebuild"
     exit 0
 fi
 
@@ -55,3 +90,6 @@ mv "$WORK/compiled/HTDemucs_CoreML_FP16.mlmodelc" "$MODEL"
 
 echo "==> done: $MODEL"
 echo "    \"Best\" is now selectable in the Reduce vocals row."
+
+[ "$PACKAGE" -eq 1 ] && package_model
+exit 0
