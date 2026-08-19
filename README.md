@@ -26,6 +26,29 @@ launches it. On first launch macOS asks for **Microphone** access — that's the
 permission Core Audio uses to capture Spotify's audio; it never touches your
 real microphone. Click **Allow**, then look for the `𝄞` in your menu bar.
 
+### Upgrade an existing clone
+
+From the same clone used for the original install:
+
+```sh
+cd /path/to/transposify
+git switch main
+git pull --ff-only
+./install.sh
+```
+
+The installer stops the running copy, rebuilds it, replaces the app in
+`/Applications`, and launches the update. It does not touch song settings,
+preferences, the login-item choice, or the downloaded vocal-removal model in
+`~/Library/Application Support/Transposify/`. If `git pull --ff-only` reports
+local changes or a divergent branch, preserve or commit that work before
+updating rather than deleting it.
+
+Because each local build is ad-hoc signed, macOS may ask again for Microphone
+or Automation access after an update. Allowing Automation lets Transposify read
+Spotify's state immediately at launch; playback notifications still recover on
+the next play/pause if it is not granted.
+
 **Requirements:** macOS 14.4 or later, the Spotify desktop app, and Apple's
 command-line tools (`xcode-select --install` if `swift` isn't found).
 
@@ -49,14 +72,19 @@ If you'd rather build the model yourself than trust a binary:
 ```
 
 That converts Meta's HTDemucs to Core ML locally and installs it to the same
-place. It takes about ten minutes, mostly spent downloading PyTorch and the
-model weights.
+place. It takes about ten minutes. The converter source is vendored, the full
+Python environment is version- and hash-locked, and the exact model checkpoint
+is mirrored in the `model-v1` release and SHA-256 verified before conversion.
+Converter provenance and third-party notices are in
+[`tools/HTDemucsCoreML/`](tools/HTDemucsCoreML/README.md).
 
 **Why the delay.** Separating a moment of audio well needs to see slightly past
 it, so `Best` buffers about a second of lookahead and emits a second at a time —
 roughly two seconds behind Spotify. That is affordable here because you sing
-*along to* the output rather than monitoring yourself through it, but it does
-mean pausing and skipping lag by the same amount. `Fast` has no such delay.
+*along to* the output rather than monitoring yourself through it. Pause and
+resume freeze and continue that delayed stream immediately without losing or
+duplicating audio. A seek or skip reaches your ears only after the already
+buffered audio has played. `Fast` has no such delay.
 
 Measured on an M4 Max: one 7.8 s window takes ~130 ms on the GPU, so the model
 runs at about 15x realtime and uses a fraction of the machine. The model is held
