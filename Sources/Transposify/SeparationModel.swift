@@ -39,11 +39,15 @@ enum SeparationModel {
 
     // MARK: - Release asset
 
+    /// model-v2 is the six-stem htdemucs_6s (vocals, drums, bass, other,
+    /// guitar, piano). A four-stem model already on disk keeps working — the
+    /// app reads the stem count from the model — so upgrading is optional.
+    ///
     /// Bumped whenever the converted model changes. The app refuses an archive
     /// whose hash doesn't match, which pins the model's *geometry* — window
     /// length and stem order are compiled in, and a mismatched model would
     /// produce silent garbage rather than an honest failure.
-    static let modelVersion = "model-v1"
+    static let modelVersion = "model-v2"
 
     static var downloadURL: URL {
         // Debug hook: point the installer at a local server to exercise the
@@ -63,9 +67,9 @@ enum SeparationModel {
     /// different digests. This must be the hash of the file actually attached
     /// to the release, not of a later rebuild.
     static let expectedArchiveSHA256 =
-        "a62bb8abdaeb8738c9cd831b52d3be90fdd2d9f2ba5c2809810aca5750d9b03b"
+        "76e06eeb2339e67dae46d5ad050899c984e9b5bed016133f315fbcfd5fcc5281"
 
-    static let approximateDownloadBytes = 141_910_700
+    static let approximateDownloadBytes = 117_969_333
 
     static var downloadSizeDescription: String {
         let mb = Double(approximateDownloadBytes) / 1_000_000
@@ -111,6 +115,12 @@ final class SeparationModelLoader {
         if case .ready(let m) = state { return m }
         return nil
     }
+
+    /// Stems the loaded model exposes, so four- and six-stem models can both be
+    /// dropped in. Taken from an actual prediction: Core ML does not populate
+    /// `multiArrayConstraint` for *outputs*, so the declared shape in the
+    /// .mlpackage isn't readable from the compiled model's description.
+    private(set) var stemCount: Int?
 
     var isLoading: Bool {
         if case .loading = state { return true }
@@ -178,11 +188,14 @@ final class SeparationModelLoader {
                 // enough GPU work to disturb playback, and the number only
                 // needs establishing once.
                 let existing = Self.measuredInference
-                let inference = Self.warmUp(model, measure: existing == nil) ?? existing
+                let warm = Self.warmUp(model, measure: existing == nil)
+                let inference = warm.seconds ?? existing
                 DispatchQueue.main.async {
+                    self.stemCount = warm.stems
                     log.notice("""
                         separation model loaded in \(String(format: "%.1f", elapsed), privacy: .public)s, \
-                        inference \(String(format: "%.0f", (inference ?? 0) * 1000), privacy: .public) ms
+                        inference \(String(format: "%.0f", (inference ?? 0) * 1000), privacy: .public) ms, \
+                        stems \(self.stemCount ?? -1, privacy: .public)
                         """)
                     if let inference {
                         UserDefaults.standard.set(inference, forKey: Self.inferenceKey)
@@ -201,7 +214,9 @@ final class SeparationModelLoader {
     }
 
     /// Run the model on silence. With `measure`, time it over extra runs.
-    private static func warmUp(_ model: MLModel, measure: Bool) -> Double? {
+    /// Also reports how many stems the output actually has.
+    private static func warmUp(_ model: MLModel,
+                               measure: Bool) -> (seconds: Double?, stems: Int?) {
         do {
             let input = try MLMultiArray(
                 shape: [1, 2, NSNumber(value: SeparationEngine.windowFrames)],
@@ -211,24 +226,31 @@ final class SeparationModelLoader {
             let provider = try MLDictionaryFeatureProvider(
                 dictionary: [SeparationEngine.inputFeature: input])
             var times: [Double] = []
+            var stems: Int?
             let runs = measure ? 3 : 1
             for i in 0..<runs {
                 let t = Date()
-                _ = try model.prediction(from: provider)
+                let out = try model.prediction(from: provider)
                 if i > 0 { times.append(-t.timeIntervalSinceNow) }
+                if stems == nil,
+                   let shape = out.featureValue(for: SeparationEngine.outputFeature)?
+                       .multiArrayValue?.shape.map(\.intValue), shape.count > 1 {
+                    stems = shape[1]
+                }
                 // Let the audio worker have the GPU between runs.
                 if i < runs - 1 { Thread.sleep(forTimeInterval: 0.05) }
             }
-            return times.isEmpty ? nil : times.sorted()[times.count / 2]
+            return (times.isEmpty ? nil : times.sorted()[times.count / 2], stems)
         } catch {
             log.error("inference measurement failed: \(String(describing: error), privacy: .public)")
-            return nil
+            return (nil, nil)
         }
     }
 
     /// Drop the model and its memory.
     func release() {
         state = .idle
+        stemCount = nil
         onChange?()
     }
 }

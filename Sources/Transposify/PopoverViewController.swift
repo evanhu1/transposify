@@ -42,6 +42,10 @@ final class PopoverViewController: NSViewController {
     private let resetButton = NSButton()
     private let powerButton = NSButton()
     private let isolatePicker = NSSegmentedControl()
+    private let advancedButton = NSButton()
+    private var stemChecks: [Stem: NSButton] = [:]
+    private var stemGrid: NSStackView!
+    private var isolateRowStack: NSStackView!
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
     private var modelRow: NSStackView!
@@ -208,7 +212,54 @@ final class PopoverViewController: NSViewController {
         isolatePicker.setToolTip("Remove the vocal, keep the backing.",
                                  forSegment: 2)
 
-        let karaokeRow = pickerRow("Isolate", isolatePicker)
+        // "Advanced" sits just above the row's right edge and swaps the
+        // three-way switcher for per-stem checkboxes.
+        advancedButton.isBordered = false
+        advancedButton.focusRingType = .none
+        advancedButton.font = .systemFont(ofSize: 11, weight: .medium)
+        advancedButton.contentTintColor = transposeAccent
+        advancedButton.target = self
+        advancedButton.action = #selector(advancedTapped)
+        advancedButton.setContentHuggingPriority(.required, for: .horizontal)
+        let advancedSpacer = NSView()
+        advancedSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let advancedRow = NSStackView(views: [advancedSpacer, advancedButton])
+        advancedRow.orientation = .horizontal
+        advancedRow.alignment = .centerY
+
+        // Two columns of checkboxes; six stems fit as three rows.
+        var columns: [NSStackView] = []
+        for pair in stride(from: 0, to: Stem.allCases.count, by: 2) {
+            var cells: [NSView] = []
+            for stem in Stem.allCases[pair..<min(pair + 2, Stem.allCases.count)] {
+                let box = NSButton(checkboxWithTitle: stem.title,
+                                   target: self, action: #selector(stemToggled(_:)))
+                box.font = .systemFont(ofSize: 12)
+                box.tag = stem.rawValue
+                box.focusRingType = .none
+                box.widthAnchor.constraint(equalToConstant: 92).isActive = true
+                stemChecks[stem] = box
+                cells.append(box)
+            }
+            let row = NSStackView(views: cells)
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            columns.append(row)
+        }
+        let grid = NSStackView(views: columns)
+        grid.orientation = .vertical
+        grid.alignment = .leading
+        grid.spacing = 4
+        stemGrid = grid
+
+        let pickerLine = pickerRow("Isolate", isolatePicker)
+        let isolateStack = NSStackView(views: [advancedRow, pickerLine, grid])
+        isolateStack.orientation = .vertical
+        isolateStack.alignment = .leading
+        isolateStack.spacing = 6
+        isolateRowStack = isolateStack
+        let karaokeRow = isolateStack
 
         // Only shown until the model is on disk (or while it's arriving).
         modelLabel.font = .systemFont(ofSize: 11)
@@ -339,6 +390,16 @@ final class PopoverViewController: NSViewController {
         // the capability is discoverable rather than hidden.
         for (i, mode) in IsolateTrack.allCases.enumerated() where mode.isolating {
             isolatePicker.setEnabled(SeparationModel.isInstalled, forSegment: i)
+        }
+        let advanced = controller.advanced
+        advancedButton.title = advanced ? "Simple" : "Advanced"
+        advancedButton.isEnabled = SeparationModel.isInstalled
+        isolatePicker.isHidden = advanced
+        stemGrid.isHidden = !advanced
+        for (stem, box) in stemChecks {
+            // Guitar and piano only exist on a six-stem model.
+            box.isHidden = stem.rawValue >= controller.stemCount
+            box.state = controller.includes(stem) ? .on : .off
         }
         refreshModelRow()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
@@ -510,6 +571,15 @@ final class PopoverViewController: NSViewController {
         } else {
             controller.downloadModel()
         }
+    }
+
+    @objc private func advancedTapped() {
+        controller.setAdvanced(!controller.advanced)
+    }
+
+    @objc private func stemToggled(_ sender: NSButton) {
+        guard let stem = Stem(rawValue: sender.tag) else { return }
+        controller.setStem(stem, included: sender.state == .on)
     }
 
     @objc private func isolateChanged() {

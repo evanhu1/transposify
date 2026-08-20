@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import math
+import os
 import warnings
 from pathlib import Path
 
@@ -33,17 +34,24 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Defaults (override via CLI args)
 # ---------------------------------------------------------------------------
-MODEL_NAME = "htdemucs"
+MODEL_NAME = os.environ.get("HTDEMUCS_MODEL", "htdemucs")
 SAMPLE_RATE = 44100
 SEGMENT_SAMPLES = 441000               # 10s @ 44.1 kHz
 NUM_CHANNELS = 2
-NUM_SOURCES = 4
+NUM_SOURCES = 6 if MODEL_NAME.endswith("_6s") else 4
 DEFAULT_OUTPUT = "HTDemucs_CoreML.mlpackage"
 
-# Demucs internal source order: drums(0), bass(1), other(2), vocals(3)
-# We reorder to vocals, drums, bass, other (typical UI / DJ convention).
-SOURCE_REORDER = [3, 0, 1, 2]
-SOURCE_NAMES = ["vocals", "drums", "bass", "other"]
+# Demucs internal source order is drums, bass, other, vocals — and for the
+# six-stem model, guitar and piano after that. We reorder so vocals comes
+# first, matching the UI convention and keeping index 0 == vocals across both
+# models so the app's stem indices stay stable.
+if NUM_SOURCES == 6:
+    # demucs: drums(0) bass(1) other(2) vocals(3) guitar(4) piano(5)
+    SOURCE_REORDER = [3, 0, 1, 2, 4, 5]
+    SOURCE_NAMES = ["vocals", "drums", "bass", "other", "guitar", "piano"]
+else:
+    SOURCE_REORDER = [3, 0, 1, 2]
+    SOURCE_NAMES = ["vocals", "drums", "bass", "other"]
 
 
 # ---------------------------------------------------------------------------

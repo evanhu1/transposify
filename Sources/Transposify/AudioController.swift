@@ -3,6 +3,27 @@ import os
 
 let log = Logger(subsystem: "com.evanhu.transposify", category: "audio")
 
+/// The stems a converted model exposes, in the order the converter emits them.
+/// Vocals is index 0 in both the four- and six-stem models, deliberately, so
+/// these indices stay stable across a model swap and a stored selection keeps
+/// meaning the same thing.
+enum Stem: Int, CaseIterable {
+    case vocals, drums, bass, other, guitar, piano
+
+    static let vocalsIndex = 0
+
+    var title: String {
+        switch self {
+        case .vocals: return "Vocals"
+        case .drums: return "Drums"
+        case .bass: return "Bass"
+        case .other: return "Other"
+        case .guitar: return "Guitar"
+        case .piano: return "Piano"
+        }
+    }
+}
+
 /// Which part of the mix to keep. Both isolating modes run the same HTDemucs
 /// pass — the model returns all four stems on every window, so choosing vocals
 /// instead of everything-else only changes which stems get summed. Neither
@@ -18,11 +39,16 @@ enum IsolateTrack: String, CaseIterable {
     /// Both isolating modes need the model, and both add the pipeline's ~2 s.
     var isolating: Bool { self != .off }
 
-    var separationMode: SeparationMode {
+    /// Which stems the simple three-way switcher maps to.
+    func selection(stemCount: Int) -> StemSelection {
         switch self {
-        case .off: return .passthrough
-        case .vocals: return .vocals
-        case .instrumental: return .instrumental
+        case .off:
+            return .passthrough
+        case .vocals:
+            return .stems(mask: 1 << Stem.vocalsIndex)
+        case .instrumental:
+            let all = (0..<stemCount).filter { $0 != Stem.vocalsIndex }
+            return .stems(mask: StemSelection.mask(all))
         }
     }
 
@@ -73,6 +99,20 @@ final class AudioController {
     /// is playing and persists across launches.
     private(set) var isolate: IsolateTrack
 
+    /// Advanced replaces the three-way switcher with per-stem checkboxes. The
+    /// mask is remembered independently, so flipping Advanced off and on again
+    /// returns to the same selection.
+    private(set) var advanced: Bool
+    private(set) var stemMask: Int
+    /// How many stems existed when `stemMask` was last saved. A model with more
+    /// stems turns the new ones on rather than leaving them silently off — the
+    /// user never unchecked something that did not exist.
+    private var knownStemCount: Int
+
+    /// How many stems the installed model actually has. Four until a six-stem
+    /// model is loaded; the extra checkboxes stay hidden until then.
+    var stemCount: Int { modelLoader.stemCount ?? 4 }
+
     /// True while the neural pipeline is filling its lookahead buffer and the
     /// output hasn't started yet.
     private(set) var priming = false
@@ -83,6 +123,9 @@ final class AudioController {
     private static let karaokeKey = "globalKaraoke"          // legacy Bool
     private static let reductionKey = "vocalReduction"        // legacy string
     private static let isolateKey = "isolateTrack"
+    private static let advancedKey = "advancedStems"
+    private static let stemMaskKey = "stemMask"
+    private static let stemMaskCountKey = "stemMaskCount"
 
     init() {
         let defaults = UserDefaults.standard
@@ -105,19 +148,28 @@ final class AudioController {
         if isolate.isolating && !SeparationModel.isInstalled {
             isolate = .off
         }
+        advanced = defaults.bool(forKey: Self.advancedKey)
+        let storedMask = defaults.object(forKey: Self.stemMaskKey) as? Int
+        // Default to everything except vocals — the common case, and it makes
+        // the first look at Advanced show something sensible rather than blank.
+        stemMask = storedMask ?? StemSelection.mask([1, 2, 3])
+        knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
+        if advanced && !SeparationModel.isInstalled { advanced = false }
         // Loading is slow, so it happens off the main thread; engagement waits
         // for readiness rather than blocking on it.
         modelLoader.onChange = { [weak self] in
             guard let self else { return }
-            if let error = self.modelLoader.error, self.isolate.isolating {
+            if let error = self.modelLoader.error, self.isolate.isolating || self.advanced {
                 self.lastError = error
             }
+            self.adoptNewStemsIfAny()
             // Late arrival: the worker picks it up at the next hop boundary.
             self.separation?.setModel(self.modelLoader.model)
+            self.applySelection()
             self.updateEngagement()
             self.onChange?()
         }
-        if isolate.isolating { modelLoader.prepare() }
+        if isolate.isolating || advanced { modelLoader.prepare() }
 
         modelInstaller.onChange = { [weak self] in
             guard let self else { return }
@@ -148,7 +200,7 @@ final class AudioController {
 
     /// True while the model is still loading and "Best" is selected — the UI
     /// shows this rather than looking broken during a cold load.
-    var preparingModel: Bool { isolate.isolating && modelLoader.isLoading }
+    var preparingModel: Bool { (isolate.isolating || advanced) && modelLoader.isLoading }
 
     private var currentTrackID: String?
     private var hasTrack = false
@@ -241,6 +293,64 @@ final class AudioController {
     func nudge(_ delta: Int) { setSemitones(semitones + delta) }
     func resetPitch() { setSemitones(0) }
 
+    /// Turn the per-stem view on or off. Purely a presentation switch as far
+    /// as the pipeline is concerned — it just changes which selection applies.
+    func setAdvanced(_ on: Bool) {
+        guard on != advanced else { return }
+        if on && !SeparationModel.isInstalled {
+            lastError = SeparationModel.installHint
+            onChange?()
+            return
+        }
+        advanced = on
+        UserDefaults.standard.set(on, forKey: Self.advancedKey)
+        if on { modelLoader.prepare() } else { releaseModelIfIdle() }
+        applySelection()
+        updateEngagement()
+        onChange?()
+    }
+
+    func setStem(_ stem: Stem, included: Bool) {
+        let bit = 1 << stem.rawValue
+        let updated = included ? (stemMask | bit) : (stemMask & ~bit)
+        guard updated != stemMask else { return }
+        stemMask = updated
+        UserDefaults.standard.set(stemMask, forKey: Self.stemMaskKey)
+        UserDefaults.standard.set(stemCount, forKey: Self.stemMaskCountKey)
+        applySelection()
+        onChange?()
+    }
+
+    func includes(_ stem: Stem) -> Bool { stemMask & (1 << stem.rawValue) != 0 }
+
+    /// What the worker should emit, given the current mode.
+    private var currentSelection: StemSelection {
+        guard advanced else { return isolate.selection(stemCount: stemCount) }
+        let available = (1 << stemCount) - 1
+        let mask = stemMask & available
+        // Everything selected is the untouched mix, and passthrough gives that
+        // bit-exact and without running the model at all.
+        return mask == available ? .passthrough : .stems(mask: mask)
+    }
+
+    private func applySelection() {
+        separation?.setSelection(currentSelection)
+    }
+
+    private func adoptNewStemsIfAny() {
+        let count = stemCount
+        guard count > knownStemCount else { return }
+        for index in knownStemCount..<count { stemMask |= (1 << index) }
+        knownStemCount = count
+        UserDefaults.standard.set(stemMask, forKey: Self.stemMaskKey)
+        UserDefaults.standard.set(count, forKey: Self.stemMaskCountKey)
+        log.notice("stem selection extended to \(count, privacy: .public) stems")
+    }
+
+    private func releaseModelIfIdle() {
+        if !advanced && !isolate.isolating { modelLoader.releaseAfterGrace() }
+    }
+
     func setIsolate(_ mode: IsolateTrack) {
         guard mode != isolate else { return }
         if mode.isolating && !SeparationModel.isInstalled {
@@ -254,7 +364,7 @@ final class AudioController {
             lastError = nil
             modelLoader.prepare()
         } else {
-            modelLoader.releaseAfterGrace()
+            releaseModelIfIdle()
         }
 
         // The pipeline runs in every mode and is always the same depth, so a
@@ -262,7 +372,7 @@ final class AudioController {
         // history and lookahead it needs, and the next hop comes out in the new
         // mode. If the model is still loading, the worker keeps passing audio
         // through and switches the moment it lands.
-        separation?.setMode(mode.separationMode)
+        applySelection()
         updateEngagement()
         onChange?()
     }
@@ -312,7 +422,11 @@ final class AudioController {
     /// The pipeline has a reason to exist (regardless of playback state).
     private var pipelineUseful: Bool {
         guard enabled, spotifyRunning, hasTrack else { return false }
-        guard semitones != 0 || isolate.isolating else { return false }
+        // Advanced with every stem checked is the untouched mix, so it is not
+        // a reason to engage — the tap would mute Spotify to hand back what
+        // Spotify was already playing.
+        let advancedChangesAudio = advanced && !currentSelection.isPassthrough
+        guard semitones != 0 || isolate.isolating || advancedChangesAudio else { return false }
         // The separation path can't start until its model is resident. The
         // headless self-test stubs the audio out entirely, so it has no model
         // to wait for.
@@ -396,7 +510,7 @@ final class AudioController {
                 delay \(String(format: "%.2f", separation.nominalDelay), privacy: .public)s \
                 (inference \(String(format: "%.0f", (SeparationModelLoader.measuredInference ?? 0) * 1000), privacy: .public) ms)
                 """)
-            separation.setMode(isolate.separationMode)
+            separation.setSelection(currentSelection)
             separation.start()
             self.separation = separation
             let sourceRing = separation.outputRing

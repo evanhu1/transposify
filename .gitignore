@@ -5,3 +5,6 @@
 
 # macOS
 .DS_Store
+
+# Converter output (large, produced on demand)
+tools/htdemucs-coreml/*.mlpackage/

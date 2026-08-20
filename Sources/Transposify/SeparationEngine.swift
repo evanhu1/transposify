@@ -13,13 +13,21 @@ private final class Flag: @unchecked Sendable {
     func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
 }
 
-/// Which stems the worker emits. Passthrough runs the same window and hop
-/// machinery but copies the input instead of predicting, so the *timing* is
-/// identical and switching costs nothing but a flag.
-enum SeparationMode: Int {
-    case passthrough = 0
-    case vocals = 1
-    case instrumental = 2
+/// What the worker emits.
+///
+/// `passthrough` runs the same window and hop machinery but copies the input
+/// instead of predicting, so the *timing* is identical to a separated hop and
+/// switching costs nothing but a flag. `stems` sums the selected sources; an
+/// empty mask is silence, which is what unchecking everything should give.
+enum StemSelection: Equatable {
+    case passthrough
+    case stems(mask: Int)
+
+    static func mask(_ indices: [Int]) -> Int {
+        indices.reduce(0) { $0 | (1 << $1) }
+    }
+
+    var isPassthrough: Bool { self == .passthrough }
 }
 
 private final class Box<T>: @unchecked Sendable {
@@ -162,7 +170,7 @@ final class SeparationEngine {
     private let shouldRun = Flag(false)
     private let exited = DispatchSemaphore(value: 0)
     private let gate = Flag(true)
-    private let modeBox = Box(SeparationMode.passthrough)
+    private let selectionBox = Box(StemSelection.passthrough)
     private let finalDrainPending = Flag(false)
     private let stagedCounter = Counter()
     private let publishedCounter = Counter()
@@ -184,10 +192,10 @@ final class SeparationEngine {
     // MARK: - Transport support
 
     /// Change what the worker emits. Safe to call at any time: the window
-    /// already holds the history *and* lookahead every mode needs, so the next
-    /// hop comes out in the new mode and the raised-cosine crossfade joins it
-    /// to the previous one. No rebuild, no re-prime, no gap.
-    func setMode(_ mode: SeparationMode) { modeBox.set(mode) }
+    /// already holds the history *and* lookahead every selection needs, so the
+    /// next hop comes out changed and the raised-cosine crossfade joins it to
+    /// the previous one. No rebuild, no re-prime, no gap.
+    func setSelection(_ selection: StemSelection) { selectionBox.set(selection) }
 
     /// Hand over the model once it finishes loading. Until then the worker runs
     /// passthrough, so audio keeps playing and the switch to separated output
@@ -412,13 +420,13 @@ final class SeparationEngine {
         // Separate when asked and able; otherwise copy the window through.
         // Both paths emit the same region of the same window, so the delay is
         // identical and a switch is inaudible apart from the crossfade.
-        let mode = modeBox.get()
+        let selection = selectionBox.get()
         var separated: MLMultiArray?
-        if mode != .passthrough, modelBox.get() != nil {
+        if !selection.isPassthrough, modelBox.get() != nil {
             guard let output = predict() else { return true }
             separated = output
         }
-        buildEmitRegion(from: separated, mode: mode)
+        buildEmitRegion(from: separated, selection: selection)
         publish()
         return true
     }
@@ -456,7 +464,7 @@ final class SeparationEngine {
 
     /// Sum the non-vocal stems over the emit region, apply the crossfade
     /// envelope, and overlap-add the previous window's tail.
-    private func buildEmitRegion(from sources: MLMultiArray?, mode: SeparationMode) {
+    private func buildEmitRegion(from sources: MLMultiArray?, selection: StemSelection) {
         let elen = emitFrames
         let start = pastFrames - crossfadeFrames
         let n = rampFrames
@@ -465,13 +473,13 @@ final class SeparationEngine {
 
         emitL.withUnsafeMutableBufferPointer { l in
             emitR.withUnsafeMutableBufferPointer { r in
-                if let sources {
+                if let sources, case .stems(let mask) = selection {
                     let strides = sources.strides.map(\.intValue)
-                    let soloVocals = (mode == .vocals)
+                    // Source count comes from the model, not a constant, so a
+                    // six-stem model would work without changing this code.
+                    let count = sources.shape.count > 1 ? sources.shape[1].intValue : 0
                     func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
-                        for s in 0..<Self.sourceCount
-                        where soloVocals ? (s == Self.vocalSourceIndex)
-                                         : (s != Self.vocalSourceIndex) {
+                        for s in 0..<count where mask & (1 << s) != 0 {
                             let lBase = s * strides[1]
                             let rBase = s * strides[1] + strides[2]
                             var f = 0

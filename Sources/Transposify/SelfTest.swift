@@ -17,6 +17,10 @@ enum SelfTest {
         let trackB = "selftest:B"
 
         controller.testHooks = (engage: { _, _ in }, disengage: { })
+        // Start from a known state: this exercises the engagement machine, not
+        // whatever per-stem selection happens to be persisted.
+        controller.setAdvanced(false)
+        controller.setIsolate(.off)
 
         let steps: [Step] = [
             Step(label: "Spotify not running \u{2192} idle",

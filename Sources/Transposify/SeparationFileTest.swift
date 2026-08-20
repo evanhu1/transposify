@@ -58,10 +58,17 @@ enum SeparationFileTest {
                         -started.timeIntervalSinceNow, engine.nominalDelay))
             // TRANSPOSIFY_ISOLATE_VOCALS=1 emits the vocal stem instead.
             let requested = ProcessInfo.processInfo.environment["TRANSPOSIFY_ISOLATE"] ?? "instrumental"
-            let mode: SeparationMode = requested == "vocals" ? .vocals
-                : requested == "off" ? .passthrough : .instrumental
-            engine.setMode(mode)
-            emit("mode: \(requested)")
+            let stems = loader.stemCount ?? 4
+            let selection: StemSelection
+            switch requested {
+            case "off": selection = .passthrough
+            case "vocals": selection = .stems(mask: 1 << Stem.vocalsIndex)
+            default:
+                selection = .stems(mask: StemSelection.mask(
+                    (0..<stems).filter { $0 != Stem.vocalsIndex }))
+            }
+            engine.setSelection(selection)
+            emit("mode: \(requested) over \(stems) stems")
             engine.start()
 
             var produced: [Float] = []
@@ -96,7 +103,8 @@ enum SeparationFileTest {
                     if !switched,
                        Double(produced.count / channels) / captureRate >= switchAt {
                         switched = true
-                        engine.setMode(.instrumental)
+                        engine.setSelection(.stems(mask: StemSelection.mask(
+                            (0..<(loader.stemCount ?? 4)).filter { $0 != Stem.vocalsIndex })))
                         emit(String(format: "  switched to instrumental at %.2fs",
                                     Double(produced.count / channels) / captureRate))
                     }
