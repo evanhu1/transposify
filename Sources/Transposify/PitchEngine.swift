@@ -17,8 +17,9 @@ private final class FloatBox { var value: Float = 1 }
 
 /// Drains the capture `RingBuffer` through the Rubber Band Library (R3 "finer"
 /// engine, real-time mode) for state-of-the-art pitch shifting without tempo
-/// change, then out to the default output device. Optional karaoke vocal
-/// reduction is applied to the input before pitch shifting.
+/// change, then out to the default output device. Vocal isolation, when on,
+/// happens upstream in `SeparationEngine`, which republishes the same format —
+/// so this stage never knows about it.
 ///
 /// Rubber Band runs directly in the `AVAudioSourceNode` render callback: each
 /// pull, we feed it input from the ring (as much as it needs) and retrieve one
@@ -47,16 +48,11 @@ final class PitchEngine {
     private let outputPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private let readScratch: UnsafeMutablePointer<Float>
 
-    private let karaokeGain = AtomicInt(100) // percent of center channel kept
     private let targetSemitones = AtomicInt(0)
 
     var semitones: Int = 0 {
         didSet { targetSemitones.set(max(-12, min(12, semitones))) }
     }
-    var karaoke: Bool = false {
-        didSet { karaokeGain.set(karaoke ? 25 : 100) }
-    }
-
     private let holdFlag = AtomicInt(0)
 
     /// While held, the render callback outputs silence *without draining the
@@ -112,7 +108,6 @@ final class PitchEngine {
         let channelBuffers = self.channelBuffers
         let inputPtrs = self.inputPtrs
         let outputPtrs = self.outputPtrs
-        let karaokeGain = self.karaokeGain
         let targetSemitones = self.targetSemitones
         let appliedSemitones = IntBox()
         let holdFlag = self.holdFlag
@@ -142,10 +137,6 @@ final class PitchEngine {
                 rubberband_set_pitch_scale(state, pow(2.0, Double(semis) / 12.0))
             }
 
-            let gainPercent = karaokeGain.get()
-            let doKaraoke = (gainPercent < 100 && ch == 2)
-            let g = Float(gainPercent) / 100.0
-
             // Feed Rubber Band from the ring until it can produce a full buffer
             // (or the ring runs dry).
             var iterations = 0
@@ -156,25 +147,10 @@ final class PitchEngine {
                 let got = ring.read(into: readScratch, count: want * ch) / ch
                 if got == 0 { break }
 
-                if doKaraoke {
-                    let left = channelBuffers[0]
-                    let right = channelBuffers[1]
+                for c in 0..<ch {
+                    let dst = channelBuffers[c]
                     var f = 0
-                    while f < got {
-                        let l = readScratch[f * 2]
-                        let r = readScratch[f * 2 + 1]
-                        let mid = (l + r) * 0.5
-                        let side = (l - r) * 0.5
-                        left[f] = g * mid + side
-                        right[f] = g * mid - side
-                        f += 1
-                    }
-                } else {
-                    for c in 0..<ch {
-                        let dst = channelBuffers[c]
-                        var f = 0
-                        while f < got { dst[f] = readScratch[f * ch + c]; f += 1 }
-                    }
+                    while f < got { dst[f] = readScratch[f * ch + c]; f += 1 }
                 }
                 rubberband_process(state, UnsafePointer(inputPtrs), UInt32(got), 0)
             }

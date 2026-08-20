@@ -103,8 +103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyDebugHooks() {
         let env = ProcessInfo.processInfo.environment
         if let v = env["TRANSPOSIFY_DEBUG_PITCH"], let n = Int(v) { controller.setSemitones(n) }
-        if let v = env["TRANSPOSIFY_DEBUG_VOCALS"], let mode = VocalReduction(rawValue: v) {
-            controller.setVocalReduction(mode)
+        if let v = env["TRANSPOSIFY_DEBUG_ISOLATE"], let mode = IsolateTrack(rawValue: v) {
+            controller.setIsolate(mode)
         }
         if let q = env["TRANSPOSIFY_DEBUG_QUIT_AFTER"], let secs = Double(q) {
             DispatchQueue.main.asyncAfter(deadline: .now() + secs) { NSApp.terminate(nil) }

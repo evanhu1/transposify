@@ -108,6 +108,7 @@ final class SeparationEngine {
     private let shouldRun = Flag(false)
     private let exited = DispatchSemaphore(value: 0)
     private let gate = Flag(true)
+    private let isolateVocals = Flag(false)
     private let finalDrainPending = Flag(false)
     private let stagedCounter = Counter()
     private let publishedCounter = Counter()
@@ -127,6 +128,11 @@ final class SeparationEngine {
     var failure: String? { failureBox.get() }
 
     // MARK: - Transport support
+
+    /// Emit the vocal stem instead of everything else. Free: the model returns
+    /// all four stems on every window either way, so this only changes which
+    /// ones get summed. Safe to flip mid-stream — no rebuild, no re-prime.
+    func setIsolateVocals(_ on: Bool) { isolateVocals.set(on) }
 
     /// Open while Spotify is playing. Closing schedules one final staging pass
     /// so audio captured *before* the pause — still sitting in the capture ring
@@ -388,8 +394,11 @@ final class SeparationEngine {
 
         emitL.withUnsafeMutableBufferPointer { l in
             emitR.withUnsafeMutableBufferPointer { r in
+                let soloVocals = self.isolateVocals.get()
                 func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
-                    for s in 0..<Self.sourceCount where s != Self.vocalSourceIndex {
+                    for s in 0..<Self.sourceCount
+                    where soloVocals ? (s == Self.vocalSourceIndex)
+                                     : (s != Self.vocalSourceIndex) {
                         let lBase = s * strides[1]
                         let rBase = s * strides[1] + strides[2]
                         var f = 0

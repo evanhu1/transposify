@@ -51,6 +51,10 @@ enum SeparationFileTest {
                 model: model)
             emit(String(format: "model loaded in %.1fs, nominal delay %.2fs",
                         -started.timeIntervalSinceNow, engine.nominalDelay))
+            // TRANSPOSIFY_ISOLATE_VOCALS=1 emits the vocal stem instead.
+            let solo = ProcessInfo.processInfo.environment["TRANSPOSIFY_ISOLATE_VOCALS"] == "1"
+            engine.setIsolateVocals(solo)
+            emit("isolating: \(solo ? "vocals" : "instrumental")")
             engine.start()
 
             var produced: [Float] = []

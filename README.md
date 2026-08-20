@@ -59,11 +59,11 @@ rm -rf /Applications/Transposify.app && tccutil reset Microphone com.evanhu.tran
 
 ## Vocal removal
 
-`Fast` needs nothing extra. `Best` needs a one-time model download: open the
+Isolating needs a one-time model download: open the
 popover and click **Download** next to "Best needs a 142 MB model". It lands in
 `~/Library/Application Support/Transposify/` and is checked against a SHA-256
 built into the app, so a corrupted or substituted download is refused rather
-than installed. Until it's there, `Best` stays greyed out.
+than installed. Until it's there, both isolating modes stay greyed out.
 
 If you'd rather build the model yourself than trust a binary:
 
@@ -97,11 +97,10 @@ Click the menu-bar item to open the popup:
 - **Now playing** — current track + artist.
 - **Transpose** — `−` / value / `+`, or the slider (±12 semitones). *Reset*
   (↺) appears when shifted.
-- **Reduce vocals** — `Off` / `Fast` / `Best`.
-  *Fast* is centre-channel cancellation: instant, but it ducks the bass and
-  drums along with the vocal. *Best* runs neural source separation (HTDemucs)
-  and genuinely removes the vocal, at the cost of about two seconds of delay
-  between Spotify and what you hear. See [Vocal removal](#vocal-removal).
+- **Isolate track** — `Off` / `Only Vocals` / `Only Instrumental`.
+  Neural source separation (HTDemucs) either keeps the vocal and drops the
+  backing, or the reverse. Both add about two seconds of delay between Spotify
+  and what you hear. See [Vocal removal](#vocal-removal).
 - **Remember key for this song** — on by default; your setting auto-applies when
   that track plays again. New songs start at the original key.
 - **Launch at login** — register as a login item via `SMAppService`.

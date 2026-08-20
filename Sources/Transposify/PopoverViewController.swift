@@ -37,7 +37,7 @@ final class PopoverViewController: NSViewController {
     private let slider = NSSlider()
     private let resetButton = NSButton()
     private let powerButton = NSButton()
-    private let vocalPicker = NSSegmentedControl()
+    private let isolatePicker = NSPopUpButton()
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
     private var modelRow: NSStackView!
@@ -163,21 +163,23 @@ final class PopoverViewController: NSViewController {
         configure(rememberSwitch, #selector(rememberToggled))
         configure(loginSwitch, #selector(loginToggled))
 
-        vocalPicker.segmentStyle = .rounded
-        vocalPicker.segmentCount = VocalReduction.allCases.count
-        vocalPicker.focusRingType = .none
-        vocalPicker.target = self
-        vocalPicker.action = #selector(vocalReductionChanged)
-        for (i, mode) in VocalReduction.allCases.enumerated() {
-            vocalPicker.setLabel(Self.label(for: mode), forSegment: i)
-            vocalPicker.setWidth(52, forSegment: i)
+        // "Only Instrumental" is too wide for a segmented control in a popover
+        // this narrow, so use a popup: it shows the current choice and keeps
+        // the row the same height as the toggles.
+        isolatePicker.pullsDown = false
+        isolatePicker.focusRingType = .none
+        isolatePicker.controlSize = .small
+        isolatePicker.font = .systemFont(ofSize: 12)
+        isolatePicker.target = self
+        isolatePicker.action = #selector(isolateChanged)
+        isolatePicker.removeAllItems()
+        for mode in IsolateTrack.allCases {
+            isolatePicker.addItem(withTitle: mode.title)
         }
-        vocalPicker.setToolTip("Leave the mix untouched.", forSegment: 0)
-        vocalPicker.setToolTip("Centre-channel reduction. Instant, but it ducks "
-            + "the bass and drums along with the vocal.", forSegment: 1)
-        vocalPicker.setToolTip("Neural separation. Genuinely removes the vocal, "
-            + "but the audio trails Spotify by about two seconds.", forSegment: 2)
-        let karaokeRow = pickerRow("Reduce vocals", vocalPicker)
+        isolatePicker.itemArray.first?.toolTip = "Play the mix untouched."
+        isolatePicker.lastItem?.toolTip = "Remove the vocal and keep the backing."
+
+        let karaokeRow = pickerRow("Isolate track", isolatePicker)
 
         // Only shown until the model is on disk (or while it's arriving).
         modelLabel.font = .systemFont(ofSize: 11)
@@ -298,13 +300,13 @@ final class PopoverViewController: NSViewController {
         resetButton.isEnabled = (s != 0)
         resetButton.alphaValue = (s != 0) ? 1 : 0
 
-        if let index = VocalReduction.allCases.firstIndex(of: controller.vocalReduction) {
-            vocalPicker.selectedSegment = index
+        if let index = IsolateTrack.allCases.firstIndex(of: controller.isolate) {
+            isolatePicker.selectItem(at: index)
         }
-        // "Best" needs the model on disk; keep it visible but unselectable so
+        // Both isolating modes need the model; keep them visible but disabled so
         // the capability is discoverable rather than hidden.
-        if let best = VocalReduction.allCases.firstIndex(of: .best) {
-            vocalPicker.setEnabled(SeparationModel.isInstalled, forSegment: best)
+        for (i, mode) in IsolateTrack.allCases.enumerated() where mode.isolating {
+            isolatePicker.item(at: i)?.isEnabled = SeparationModel.isInstalled
         }
         refreshModelRow()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
@@ -317,7 +319,7 @@ final class PopoverViewController: NSViewController {
             ? "Transposing is on \u{2014} click to just listen"
             : "Transposing is off \u{2014} click to enable"
         for row in inactiveWhenOff { row.alphaValue = on ? 1 : 0.4 }
-        for control in [slider, minusButton, plusButton, resetButton, vocalPicker] as [NSControl] {
+        for control in [slider, minusButton, plusButton, resetButton, isolatePicker] as [NSControl] {
             control.isEnabled = on
         }
         // resetButton still hides itself at 0 even when enabled.
@@ -348,18 +350,11 @@ final class PopoverViewController: NSViewController {
     }
 
     /// A label plus a segmented control, matching the toggle rows' metrics.
-    private func pickerRow(_ title: String, _ control: NSSegmentedControl) -> NSStackView {
+    private func pickerRow(_ title: String, _ control: NSControl) -> NSStackView {
         control.setContentHuggingPriority(.required, for: .horizontal)
         return toggleRow(title, control, tooltip:
-            "How much of the original vocal to remove, and how much delay to accept.")
-    }
-
-    static func label(for mode: VocalReduction) -> String {
-        switch mode {
-        case .off: return "Off"
-        case .fast: return "Fast"
-        case .best: return "Best"
-        }
+            "Keep only the vocal, or only the backing. Both add about two "
+            + "seconds of delay; the mix plays untouched when off.")
     }
 
     private func stepButton(_ symbol: String, _ action: Selector) -> NSButton {
@@ -425,7 +420,7 @@ final class PopoverViewController: NSViewController {
             // Nothing to say once it's on disk.
             modelRow.isHidden = SeparationModel.isInstalled
             modelLabel.stringValue =
-                "\u{201C}Best\u{201D} needs a \(SeparationModel.downloadSizeDescription) model"
+                "Isolating needs a \(SeparationModel.downloadSizeDescription) model"
             modelLabel.textColor = .secondaryLabelColor
             modelButton.title = "Download"
         }
@@ -442,10 +437,10 @@ final class PopoverViewController: NSViewController {
         }
     }
 
-    @objc private func vocalReductionChanged() {
-        let index = vocalPicker.selectedSegment
-        guard index >= 0, index < VocalReduction.allCases.count else { return }
-        controller.setVocalReduction(VocalReduction.allCases[index])
+    @objc private func isolateChanged() {
+        let index = isolatePicker.indexOfSelectedItem
+        guard index >= 0, index < IsolateTrack.allCases.count else { return }
+        controller.setIsolate(IsolateTrack.allCases[index])
     }
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
     @objc private func loginToggled() {
