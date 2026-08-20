@@ -94,6 +94,16 @@ final class SeparationModelLoader {
     }
 
     private(set) var state: State = .idle
+
+    /// Median time for one window, measured right after loading. Persisted,
+    /// because the pipeline's hop has to be chosen before the model is
+    /// necessarily resident, and it must not change while audio is flowing.
+    private static let inferenceKey = "measuredInferenceSeconds"
+
+    static var measuredInference: Double? {
+        let v = UserDefaults.standard.double(forKey: inferenceKey)
+        return v > 0 ? v : nil
+    }
     /// Called on the main queue whenever `state` changes.
     var onChange: (() -> Void)?
 
@@ -133,8 +143,19 @@ final class SeparationModelLoader {
             do {
                 let model = try MLModel(contentsOf: url, configuration: config)
                 let elapsed = -started.timeIntervalSinceNow
+                // Warm up and time it. The first prediction pays Core ML's
+                // per-device specialisation, which is why it is discarded —
+                // and why doing this here keeps that cost out of the audio
+                // path entirely.
+                let inference = Self.measureInference(model)
                 DispatchQueue.main.async {
-                    log.notice("separation model loaded in \(String(format: "%.1f", elapsed), privacy: .public)s")
+                    log.notice("""
+                        separation model loaded in \(String(format: "%.1f", elapsed), privacy: .public)s, \
+                        inference \(String(format: "%.0f", (inference ?? 0) * 1000), privacy: .public) ms
+                        """)
+                    if let inference {
+                        UserDefaults.standard.set(inference, forKey: Self.inferenceKey)
+                    }
                     self.state = .ready(model)
                     self.onChange?()
                 }
@@ -145,6 +166,29 @@ final class SeparationModelLoader {
                     self.onChange?()
                 }
             }
+        }
+    }
+
+    /// Three predictions on silence; the first is discarded as warm-up.
+    private static func measureInference(_ model: MLModel) -> Double? {
+        do {
+            let input = try MLMultiArray(
+                shape: [1, 2, NSNumber(value: SeparationEngine.windowFrames)],
+                dataType: .float32)
+            memset(input.dataPointer, 0,
+                   2 * SeparationEngine.windowFrames * MemoryLayout<Float>.size)
+            let provider = try MLDictionaryFeatureProvider(
+                dictionary: [SeparationEngine.inputFeature: input])
+            var times: [Double] = []
+            for i in 0..<3 {
+                let t = Date()
+                _ = try model.prediction(from: provider)
+                if i > 0 { times.append(-t.timeIntervalSinceNow) }
+            }
+            return times.sorted()[times.count / 2]
+        } catch {
+            log.error("inference measurement failed: \(String(describing: error), privacy: .public)")
+            return nil
         }
     }
 

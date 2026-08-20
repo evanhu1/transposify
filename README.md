@@ -146,6 +146,96 @@ Spotify ─► Core Audio process tap (muted-when-tapped) ─► ring buffer
 - **Now playing / per-song memory**: read from Spotify's `PlaybackStateChanged`
   distributed notification (instant, no polling), keyed by track ID.
 
+## How the live separation works
+
+Isolating a track in real time is a sliding-window problem. HTDemucs looks at
+**7.8 seconds at a time** and takes about **110 ms** to do it on an M4 Max —
+both fixed by the converted model. Everything else is a choice about how often
+to slide that window and which part of each result to keep.
+
+```
+        ── 7.8 s window the model actually sees ──
+   ┌───────────────────────────────────────────────┐
+   │        past context        │ keep │ lookahead │
+   └───────────────────────────────────────────────┘
+                                └ hop ─┘           └─ newest audio captured
+```
+
+**Hop** is how often the model runs, and how big a block the audio comes out
+in. GPU duty is simply `inference ÷ hop`: run it every second and the GPU is
+busy 11% of the time; every quarter-second and it's 44%. A smaller hop means
+fresher output at the cost of power — and only while actually separating, since
+`Off` copies the window through without touching the model.
+
+**Lookahead** is how much already-captured audio sits *after* the part being
+kept. Future context genuinely helps — whether a sound is a held vowel or a
+cymbal decay is much clearer once you have heard what follows. It has a sharp
+knee:
+
+| lookahead | 0 s | 0.25 s | 0.5 s | 1.0 s | 2.0 s |
+|---|---|---|---|---|---|
+| quality (dB vs offline) | 19.3 | 20.5 | 22.0 | 23.2 | 24.2 |
+
+A quarter-second captures most of the benefit; beyond half a second it buys
+almost nothing.
+
+**Delay** is those three added together — `hop + lookahead + inference`. You
+wait for the future context to exist, wait to compute it, then wait for your
+block to fill.
+
+### Hop is chosen for your Mac, not for mine
+
+GPU duty is `inference / hop`, so a hop that sits at 44% duty on an M4 Max
+would demand well over 100% on an M1 — the worker would fall permanently
+behind and the audio would break up. A single hard-coded value cannot serve
+both machines.
+
+So the model is timed once, right after it loads (which also absorbs Core ML's
+first-run specialisation, keeping that cost out of the audio path). The
+measurement is persisted, and the hop is scaled to hit roughly **40% GPU duty**,
+clamped to 0.15–2.0 s. Faster Macs get lower latency; slower Macs get audio
+that keeps up. Roughly:
+
+| Mac | inference | hop | delay |
+|---|---|---|---|
+| M4 Max | ~175 ms | ~0.44 s | ~0.7 s |
+| mid-range | ~300 ms | ~0.75 s | ~1.1 s |
+| M1 | ~700 ms | ~1.75 s | ~2.7 s |
+
+### Every mode carries the same delay, including Off
+
+Separated audio for a moment only exists once the input has passed it by
+`lookahead + inference`. Playing it at its natural time therefore *requires*
+the output to be delayed. A zero-delay `Off` cutting over to a delayed stream
+would have to insert a gap, repeat a couple of seconds, or bend the tempo.
+
+So `Off` runs the same window and hop machinery and just copies the input
+instead of predicting it — same delay, no GPU. Because every mode is delayed
+identically, switching is only a flag: the worker already holds the history and
+the lookahead the new mode needs, so the next block comes out separated and the
+existing crossfade joins it to the previous one. No gap, no repeat, no drift.
+Any preparation — even a cold model load — happens underneath audio that keeps
+playing.
+
+### Why the delay is small now
+
+The quality figures above are measured against *whole-file offline Demucs*:
+how close streaming gets to what the model would do seeing the entire song at
+once. They are not the separation quality itself. Offline Demucs is only about
+**9 dB** against true isolated stems — that is the model's own error, and it is
+what you actually hear as faint bleed. Streaming sits ~22 dB below the offline
+result, i.e. roughly 13 dB below the model's own error, so it contributes
+essentially nothing.
+
+Which means hop and lookahead control **latency and power, not quality**.
+Sweeping them from 2.1 s of delay down to 0.5 s moved the number from 23.2 dB
+to 22.5 dB and wobbled rather than trended — noise, not signal. The original
+2 s delay was buying nothing.
+
+If you want better separation, none of these knobs will do it; you are at the
+model's ceiling, and the next model up (Mel-Band RoFormer, ~2 dB better) is
+roughly 12x too slow to stream.
+
 ## Diagnostics & tests
 
 ```sh

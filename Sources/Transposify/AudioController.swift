@@ -373,6 +373,11 @@ final class AudioController {
                 channels: capture.channelCount,
                 inputRing: capture.ring,
                 model: modelLoader.model)
+            log.notice("""
+                pipeline: hop \(String(format: "%.2f", separation.hopSeconds), privacy: .public)s \
+                delay \(String(format: "%.2f", separation.nominalDelay), privacy: .public)s \
+                (inference \(String(format: "%.0f", (SeparationModelLoader.measuredInference ?? 0) * 1000), privacy: .public) ms)
+                """)
             separation.setMode(isolate.separationMode)
             separation.start()
             self.separation = separation

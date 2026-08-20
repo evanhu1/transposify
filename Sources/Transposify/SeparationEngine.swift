@@ -83,9 +83,36 @@ final class SeparationEngine {
     static let windowFrames = 343_980          // 7.8 s at 44.1 kHz
     static let inputFeature = "audio"
     static let outputFeature = "sources"
-    /// Streaming defaults. Delay is hop + lookahead + inference (~0.6 s).
-    static let defaultHopSeconds = 0.25
+    /// Lookahead sits at the knee of the quality curve: a quarter-second buys
+    /// most of what future context is worth, and it costs delay but no GPU.
     static let defaultLookaheadSeconds = 0.25
+
+    /// Hop is the machine-dependent one. GPU duty is `inference / hop`, so a
+    /// hop that is comfortable on fast hardware can exceed 100% duty on slow
+    /// hardware — the worker would fall permanently behind and the audio would
+    /// break up. Scale it to the measured inference instead of assuming.
+    ///
+    /// The multiplier targets ~40% duty, leaving headroom for the resampling,
+    /// the window slide and ordinary scheduling jitter. Clamped so a very fast
+    /// machine doesn't thrash on tiny blocks and a very slow one doesn't drift
+    /// into absurd latency.
+    static let dutyTarget = 0.40
+    static let minHopSeconds = 0.15
+    static let maxHopSeconds = 2.0
+
+    /// Used until the model has been loaded once and timed. Corresponds to a
+    /// mid-range Apple Silicon GPU; the real value is persisted after the first
+    /// load and used from then on.
+    static let assumedInferenceSeconds = 0.30
+
+    static func recommendedHopSeconds(inferenceSeconds: Double?) -> Double {
+        let inference = inferenceSeconds ?? assumedInferenceSeconds
+        return min(maxHopSeconds, max(minHopSeconds, inference / dutyTarget))
+    }
+
+    static var defaultHopSeconds: Double {
+        recommendedHopSeconds(inferenceSeconds: SeparationModelLoader.measuredInference)
+    }
 
     /// The converter emits [vocals, drums, bass, other].
     static let vocalSourceIndex = 0
@@ -100,6 +127,8 @@ final class SeparationEngine {
     private var rampFrames: Int { 2 * crossfadeFrames }
     /// Frames produced per prediction; the last `rampFrames` are carried over.
     private var emitFrames: Int { hopFrames + rampFrames }
+
+    var hopSeconds: Double { Double(hopFrames) / Self.modelRate }
 
     /// Added latency in seconds, excluding inference time.
     var nominalDelay: Double { Double(hopFrames + lookaheadFrames) / Self.modelRate }
