@@ -37,10 +37,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Fixed-width status item (treble clef + signed value) so the value and
         // neighboring menu-bar items never shift between e.g. "0", "−1", "−12".
-        let menuFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        // 11 pt rather than the 13 pt system size: the item is fixed-width and
+        // has to reserve room for the widest value, so the digit size sets the
+        // whole item's width.
+        let menuFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         let numberWidth = ("\u{2212}12" as NSString).size(withAttributes: [.font: menuFont]).width
         let clef = Self.trebleClefImage()
-        statusItem = NSStatusBar.system.statusItem(withLength: ceil(clef.size.width + numberWidth) + 2)
+        // Fixed width so the value and its neighbours never shift, but with no
+        // slack beyond what "−12" actually measures. A literal 25% cut would
+        // clip the digits: the glyph plus "−12" genuinely needs this much.
+        // The +2 is not slack: NSStatusItem insets its button's content, and
+        // without it the last digit of "−12" is clipped.
+        let statusWidth = ceil(clef.size.width + numberWidth) + 2
+        statusItem = NSStatusBar.system.statusItem(withLength: statusWidth)
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(togglePopover)
@@ -173,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard probe.ink.height > 0 else { return NSImage(size: NSSize(width: 1, height: 1)) }
         let (line, ink) = measure(at: 100 * targetHeight / probe.ink.height)
 
-        let padding: CGFloat = 1   // breathing room before the semitone value
+        let padding: CGFloat = 0.5   // breathing room before the semitone value
         let size = NSSize(width: max(1, ceil(ink.width + 2 * padding)),
                           height: max(1, ceil(ink.height)))
         let image = NSImage(size: size)

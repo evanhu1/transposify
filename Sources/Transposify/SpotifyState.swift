@@ -14,6 +14,10 @@ final class SpotifyState {
     private(set) var isPlaying = false
     private(set) var isRunning = false
 
+    /// Whether Apple Events to Spotify are allowed. Only the now-playing
+    /// snapshot and album art need it; playback tracking does not.
+    private(set) var automation: AutomationPermission.Status = .unknown
+
     var onChange: (() -> Void)?
 
     private let bundleID = "com.spotify.client"
@@ -28,6 +32,7 @@ final class SpotifyState {
         workspace.addObserver(self, selector: #selector(appsChanged),
                               name: NSWorkspace.didTerminateApplicationNotification, object: nil)
         refreshRunning()
+        // Querying is also what triggers macOS's consent prompt.
         if isRunning { queryInitialState() }
     }
 
@@ -93,12 +98,22 @@ final class SpotifyState {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
         if let error {
-            // Usually a missing Automation grant (System Settings ▸ Privacy &
-            // Security ▸ Automation). Playback notifications still work, so the
-            // app recovers as soon as the user next plays or pauses.
-            log.error("Spotify query failed: \(error, privacy: .public)")
+            // -1743 is specifically "not authorised to send Apple events", so
+            // the failure doubles as the permission answer. Playback
+            // notifications still work, so the app recovers regardless.
+            let code = (error[NSAppleScript.errorNumber] as? Int) ?? 0
+            if code == AutomationPermission.notPermitted {
+                if automation != .denied {
+                    automation = .denied
+                    log.notice("automation permission denied; album art unavailable")
+                    onChange?()
+                }
+            } else {
+                log.error("Spotify query failed: \(error, privacy: .public)")
+            }
             return nil
         }
+        if automation != .granted { automation = .granted }
         return result?.stringValue
     }
 }

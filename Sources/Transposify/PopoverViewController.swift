@@ -432,9 +432,14 @@ final class PopoverViewController: NSViewController {
     private func updateArtwork() {
         let trackID = spotify.current?.id ?? ""
         if let image = artwork.image(for: trackID) {
+            // Cover art fills the tile.
+            artworkView.imageScaling = .scaleProportionallyUpOrDown
             artworkView.image = image
             artworkView.contentTintColor = nil
         } else {
+            // The placeholder glyph must NOT scale, or it is blown up to fill
+            // the tile and the point size has no visible effect.
+            artworkView.imageScaling = .scaleNone
             artworkView.image = NSImage(systemSymbolName: "music.note",
                                         accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 15, weight: .medium))
@@ -471,19 +476,35 @@ final class PopoverViewController: NSViewController {
             modelLabel.textColor = .systemRed
             modelButton.title = "Retry"
         case .idle, .installed:
-            // Nothing to say once it's on disk.
-            modelRow.isHidden = SeparationModel.isInstalled
-            modelLabel.stringValue =
-                "Isolating needs a \(SeparationModel.downloadSizeDescription) model"
             modelLabel.textColor = .secondaryLabelColor
-            modelButton.title = "Download"
+            if !SeparationModel.isInstalled {
+                modelRow.isHidden = false
+                modelLabel.stringValue =
+                    "Isolating needs a \(SeparationModel.downloadSizeDescription) model"
+                modelButton.title = "Download"
+            } else if spotify.automation == .denied {
+                // Model is fine, so the row is free for the next useful thing.
+                modelRow.isHidden = false
+                modelLabel.stringValue = "Album art needs Automation access"
+                modelButton.title = "Open Settings"
+            } else {
+                modelRow.isHidden = true
+                modelButton.title = ""
+            }
         }
         modelButton.isHidden = modelButton.title.isEmpty
-        modelLabel.toolTip = "Neural separation runs on your Mac; the model is "
-            + "downloaded once and verified against a checksum."
+        modelLabel.toolTip = SeparationModel.isInstalled
+            ? "System Settings \u{25B8} Privacy & Security \u{25B8} Automation "
+                + "\u{25B8} Transposify \u{25B8} Spotify"
+            : "Neural separation runs on your Mac; the model is downloaded once "
+                + "and verified against a checksum."
     }
 
     @objc private func modelButtonTapped() {
+        if SeparationModel.isInstalled, spotify.automation == .denied {
+            AutomationPermission.openSettings()
+            return
+        }
         if controller.modelInstaller.isBusy {
             controller.cancelModelDownload()
         } else {
