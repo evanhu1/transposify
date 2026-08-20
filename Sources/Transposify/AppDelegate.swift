@@ -122,6 +122,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let v = env["TRANSPOSIFY_DEBUG_ISOLATE"], let mode = IsolateTrack(rawValue: v) {
             controller.setIsolate(mode)
         }
+        // "12:vocals" — flip isolation mid-playback, to exercise the model
+        // load happening under live audio.
+        // "8:vocals,14:off,18:vocals" — several switches, comma separated.
+        if let spec = env["TRANSPOSIFY_DEBUG_SWITCH_AFTER"] {
+            for step in spec.split(separator: ",") {
+                let parts = step.split(separator: ":").map(String.init)
+                guard parts.count == 2, let delay = Double(parts[0]),
+                      let mode = IsolateTrack(rawValue: parts[1]) else { continue }
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    log.notice("debug: switching to \(mode.rawValue, privacy: .public)")
+                    self?.controller.setIsolate(mode)
+                }
+            }
+        }
         if let q = env["TRANSPOSIFY_DEBUG_QUIT_AFTER"], let secs = Double(q) {
             DispatchQueue.main.asyncAfter(deadline: .now() + secs) { NSApp.terminate(nil) }
         }

@@ -122,8 +122,29 @@ final class SeparationModelLoader {
         return nil
     }
 
+    /// How long the model stays resident after it stops being needed. Loading
+    /// costs seconds, so flicking Off and back should not pay for it twice.
+    static let releaseGrace: TimeInterval = 90
+    private var releaseWork: DispatchWorkItem?
+
+    /// Drop the model, but not yet.
+    func releaseAfterGrace(_ seconds: TimeInterval = SeparationModelLoader.releaseGrace) {
+        guard model != nil, releaseWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.releaseWork = nil
+            self.release()
+            log.notice("separation model released after grace period")
+        }
+        releaseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
     /// Begin loading if it isn't already loaded or in flight. Safe to call often.
     func prepare() {
+        // Wanted again before the grace period expired: keep what we have.
+        releaseWork?.cancel()
+        releaseWork = nil
         switch state {
         case .loading, .ready: return
         case .idle, .failed: break
@@ -135,7 +156,10 @@ final class SeparationModelLoader {
         }
         state = .loading
         onChange?()
-        DispatchQueue.global(qos: .userInitiated).async {
+        // .utility, not .userInitiated: loading competes with the separation
+        // worker that is feeding the render thread, and starving that worker
+        // empties the output ring and drops audio.
+        DispatchQueue.global(qos: .utility).async {
             let config = MLModelConfiguration()
             // HTDemucs returns silent garbage on the Neural Engine.
             config.computeUnits = .cpuAndGPU
@@ -147,7 +171,14 @@ final class SeparationModelLoader {
                 // per-device specialisation, which is why it is discarded —
                 // and why doing this here keeps that cost out of the audio
                 // path entirely.
-                let inference = Self.measureInference(model)
+                // Warm up always — the first prediction pays Core ML's
+                // per-device specialisation, and paying it here keeps it out
+                // of the audio path. Only *time* it when there is no stored
+                // measurement: three back-to-back window predictions are
+                // enough GPU work to disturb playback, and the number only
+                // needs establishing once.
+                let existing = Self.measuredInference
+                let inference = Self.warmUp(model, measure: existing == nil) ?? existing
                 DispatchQueue.main.async {
                     log.notice("""
                         separation model loaded in \(String(format: "%.1f", elapsed), privacy: .public)s, \
@@ -169,8 +200,8 @@ final class SeparationModelLoader {
         }
     }
 
-    /// Three predictions on silence; the first is discarded as warm-up.
-    private static func measureInference(_ model: MLModel) -> Double? {
+    /// Run the model on silence. With `measure`, time it over extra runs.
+    private static func warmUp(_ model: MLModel, measure: Bool) -> Double? {
         do {
             let input = try MLMultiArray(
                 shape: [1, 2, NSNumber(value: SeparationEngine.windowFrames)],
@@ -180,12 +211,15 @@ final class SeparationModelLoader {
             let provider = try MLDictionaryFeatureProvider(
                 dictionary: [SeparationEngine.inputFeature: input])
             var times: [Double] = []
-            for i in 0..<3 {
+            let runs = measure ? 3 : 1
+            for i in 0..<runs {
                 let t = Date()
                 _ = try model.prediction(from: provider)
                 if i > 0 { times.append(-t.timeIntervalSinceNow) }
+                // Let the audio worker have the GPU between runs.
+                if i < runs - 1 { Thread.sleep(forTimeInterval: 0.05) }
             }
-            return times.sorted()[times.count / 2]
+            return times.isEmpty ? nil : times.sorted()[times.count / 2]
         } catch {
             log.error("inference measurement failed: \(String(describing: error), privacy: .public)")
             return nil

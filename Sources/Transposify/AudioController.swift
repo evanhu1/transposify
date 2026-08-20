@@ -174,6 +174,19 @@ final class AudioController {
     /// wait for its audio. `target` is the staged-frame position of the
     /// boundary; the watchdog applies `value` once consumption passes it.
     private var pendingSemitones: (target: Int, value: Int)?
+    private var lastUnderrunLog = 0
+
+    /// Buffered audio to build before letting playback start, in ring floats.
+    /// Sized to comfortably exceed one inference, since switching modes shifts
+    /// production later by exactly that much.
+    private var cushionFloats: Int {
+        let inference = SeparationModelLoader.measuredInference
+            ?? SeparationEngine.assumedInferenceSeconds
+        let seconds = max(0.15, inference * 1.5)
+        let rate = capture?.sampleRate ?? 48_000
+        let channels = capture?.channelCount ?? 2
+        return Int(seconds * rate) * channels
+    }
 
     /// When set, engage/disengage drive these stubs instead of real audio —
     /// used by the headless self-test to verify the state machine.
@@ -237,7 +250,12 @@ final class AudioController {
         }
         isolate = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.isolateKey)
-        if mode.isolating { lastError = nil; modelLoader.prepare() }
+        if mode.isolating {
+            lastError = nil
+            modelLoader.prepare()
+        } else {
+            modelLoader.releaseAfterGrace()
+        }
 
         // The pipeline runs in every mode and is always the same depth, so a
         // mode change never rebuilds or re-primes: the worker already holds the
@@ -316,7 +334,7 @@ final class AudioController {
             disengageWork?.cancel()
             disengageWork = nil
             if engaged {
-                if let engine, engine.hold {
+                if let engine, engine.hold, !priming {
                     engine.hold = false
                     log.notice("hold released\(self.flightDescription(), privacy: .public)")
                 }
@@ -389,6 +407,12 @@ final class AudioController {
                                      channels: capture.channelCount, ring: sourceRing)
             engine.semitones = semitones
             engine.onConfigurationChange = { [weak self] in self?.reconfigure() }
+            // Hold output until a cushion of audio exists. Releasing as soon as
+            // the ring is merely non-empty leaves no floor, so every hiccup —
+            // the switch from passthrough to separation especially, which
+            // shifts production later by one inference — empties it and drops
+            // samples. The cushion is the floor that absorbs them.
+            engine.hold = true
             try engine.start()
             self.capture = capture
             self.engine = engine
@@ -436,9 +460,26 @@ final class AudioController {
                 self.onChange?()
                 return
             }
-            if self.priming && separation.outputRing.availableToRead > 0 {
+            if self.priming, separation.outputRing.availableToRead >= self.cushionFloats {
                 self.priming = false
+                self.engine?.hold = false
+                // Underruns before this point are the start-up gap, which is
+                // unavoidable when the pipeline builds its buffer from empty.
+                self.engine?.resetUnderruns()
+                self.lastUnderrunLog = 0
                 self.onChange?()
+            }
+            // Trace where glitches land relative to loading and switching.
+            if let engine = self.engine, !self.priming {
+                let n = engine.underruns
+                if n > self.lastUnderrunLog {
+                    log.notice("""
+                        underruns \(n, privacy: .public) (+\(n - self.lastUnderrunLog, privacy: .public)) \
+                        model \(self.modelLoader.model != nil, privacy: .public) \
+                        worker \(separation.hasModel, privacy: .public)
+                        """)
+                    self.lastUnderrunLog = n
+                }
             }
             if let pending = self.pendingSemitones,
                separation.consumedCaptureFrames >= pending.target {
@@ -460,15 +501,18 @@ final class AudioController {
             return
         }
         separationWatchdog?.cancel(); separationWatchdog = nil
+        let underrunsAtStop = engine?.underruns ?? 0
         engine?.stop(); engine = nil
         // Stop the worker before the capture ring it reads from goes away.
         separation?.stop(); separation = nil
         capture?.stop(); capture = nil
         priming = false
-        modelLoader.release()    // held only while audio is actually flowing
+        modelLoader.releaseAfterGrace()   // keep it briefly in case they return
         pendingSemitones = nil   // next engage seeds engine.semitones directly
         engaged = false
-        if wasEngaged { log.notice("disengaged (passthrough)") }
+        if wasEngaged {
+            log.notice("disengaged (passthrough), underruns \(underrunsAtStop, privacy: .public)")
+        }
         onChange?()
     }
 

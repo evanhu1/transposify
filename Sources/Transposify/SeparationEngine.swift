@@ -302,7 +302,8 @@ final class SeparationEngine {
         shouldRun.set(true)
         let t = Thread { [weak self] in self?.run() }
         t.name = "com.evanhu.transposify.separation"
-        t.qualityOfService = .userInitiated
+        // This thread feeds the render callback; it must outrank model loading.
+        t.qualityOfService = .userInteractive
         t.stackSize = 512 * 1024
         thread = t
         t.start()

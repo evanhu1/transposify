@@ -9,6 +9,7 @@ private final class AtomicInt: @unchecked Sendable {
     private let value: Atomic<Int>
     init(_ initial: Int) { value = Atomic<Int>(initial) }
     func set(_ newValue: Int) { value.store(newValue, ordering: .relaxed) }
+    func add(_ n: Int) { value.wrappingAdd(n, ordering: .relaxed) }
     func get() -> Int { value.load(ordering: .relaxed) }
 }
 
@@ -54,6 +55,16 @@ final class PitchEngine {
         didSet { targetSemitones.set(max(-12, min(12, semitones))) }
     }
     private let holdFlag = AtomicInt(0)
+    private let underrunCount = AtomicInt(0)
+
+    /// Render pulls that came up short — the output ring ran dry. Any non-zero
+    /// value is audible as a gap, so this is the number to watch when judging
+    /// whether a transition is actually seamless.
+    var underruns: Int { underrunCount.get() }
+
+    /// Called once the pipeline has primed, so the count that follows reflects
+    /// real glitches rather than the expected start-up gap.
+    func resetUnderruns() { underrunCount.set(0) }
 
     /// While held, the render callback outputs silence *without draining the
     /// ring*, after a 10 ms fade. Everything buffered upstream stays put, so
@@ -111,6 +122,7 @@ final class PitchEngine {
         let targetSemitones = self.targetSemitones
         let appliedSemitones = IntBox()
         let holdFlag = self.holdFlag
+        let underrunCount = self.underrunCount
         let holdGain = FloatBox()
         let gainStep = Float(1.0 / (0.010 * sampleRate))   // 10 ms fade
 
@@ -171,6 +183,7 @@ final class PitchEngine {
                     }
                 }
                 if toRetrieve == 0 { isSilence.pointee = true }
+                underrunCount.add(1)
             }
 
             // Ramp toward the hold target so pause/resume never clicks. The
