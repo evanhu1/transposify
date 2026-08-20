@@ -97,7 +97,7 @@ Click the menu-bar item to open the popup:
 - **Now playing** — current track + artist.
 - **Transpose** — `−` / value / `+`, or the slider (±12 semitones). *Reset*
   (↺) appears when shifted.
-- **Isolate track** — `Off` / `Only Vocals` / `Only Instrumental`.
+- **Isolate** — `Off` / `Vocals` / `Instrumental`.
   Neural source separation (HTDemucs) either keeps the vocal and drops the
   backing, or the reverse. Both add about two seconds of delay between Spotify
   and what you hear. See [Vocal removal](#vocal-removal).

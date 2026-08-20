@@ -37,7 +37,7 @@ final class PopoverViewController: NSViewController {
     private let slider = NSSlider()
     private let resetButton = NSButton()
     private let powerButton = NSButton()
-    private let isolatePicker = NSPopUpButton()
+    private let isolatePicker = NSSegmentedControl()
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
     private var modelRow: NSStackView!
@@ -163,23 +163,25 @@ final class PopoverViewController: NSViewController {
         configure(rememberSwitch, #selector(rememberToggled))
         configure(loginSwitch, #selector(loginToggled))
 
-        // "Only Instrumental" is too wide for a segmented control in a popover
-        // this narrow, so use a popup: it shows the current choice and keeps
-        // the row the same height as the toggles.
-        isolatePicker.pullsDown = false
+        // Segment widths are explicit: the popover is 296 pt wide, and three
+        // auto-sized segments plus a full-length row label overflow it.
+        isolatePicker.segmentStyle = .rounded
+        isolatePicker.segmentCount = IsolateTrack.allCases.count
         isolatePicker.focusRingType = .none
-        isolatePicker.controlSize = .small
         isolatePicker.font = .systemFont(ofSize: 12)
         isolatePicker.target = self
         isolatePicker.action = #selector(isolateChanged)
-        isolatePicker.removeAllItems()
-        for mode in IsolateTrack.allCases {
-            isolatePicker.addItem(withTitle: mode.title)
+        for (i, mode) in IsolateTrack.allCases.enumerated() {
+            isolatePicker.setLabel(mode.title, forSegment: i)
+            isolatePicker.setWidth(mode.segmentWidth, forSegment: i)
         }
-        isolatePicker.itemArray.first?.toolTip = "Play the mix untouched."
-        isolatePicker.lastItem?.toolTip = "Remove the vocal and keep the backing."
+        isolatePicker.setToolTip("Play the mix untouched.", forSegment: 0)
+        isolatePicker.setToolTip("Keep the vocal, drop the backing. Adds ~2 s of delay.",
+                                 forSegment: 1)
+        isolatePicker.setToolTip("Remove the vocal, keep the backing. Adds ~2 s of delay.",
+                                 forSegment: 2)
 
-        let karaokeRow = pickerRow("Isolate track", isolatePicker)
+        let karaokeRow = pickerRow("Isolate", isolatePicker)
 
         // Only shown until the model is on disk (or while it's arriving).
         modelLabel.font = .systemFont(ofSize: 11)
@@ -301,12 +303,12 @@ final class PopoverViewController: NSViewController {
         resetButton.alphaValue = (s != 0) ? 1 : 0
 
         if let index = IsolateTrack.allCases.firstIndex(of: controller.isolate) {
-            isolatePicker.selectItem(at: index)
+            isolatePicker.selectedSegment = index
         }
         // Both isolating modes need the model; keep them visible but disabled so
         // the capability is discoverable rather than hidden.
         for (i, mode) in IsolateTrack.allCases.enumerated() where mode.isolating {
-            isolatePicker.item(at: i)?.isEnabled = SeparationModel.isInstalled
+            isolatePicker.setEnabled(SeparationModel.isInstalled, forSegment: i)
         }
         refreshModelRow()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
@@ -438,7 +440,7 @@ final class PopoverViewController: NSViewController {
     }
 
     @objc private func isolateChanged() {
-        let index = isolatePicker.indexOfSelectedItem
+        let index = isolatePicker.selectedSegment
         guard index >= 0, index < IsolateTrack.allCases.count else { return }
         controller.setIsolate(IsolateTrack.allCases[index])
     }

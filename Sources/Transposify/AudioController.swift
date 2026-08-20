@@ -21,8 +21,17 @@ enum IsolateTrack: String, CaseIterable {
     var title: String {
         switch self {
         case .off: return "Off"
-        case .vocals: return "Only Vocals"
-        case .instrumental: return "Only Instrumental"
+        case .vocals: return "Vocals"
+        case .instrumental: return "Instrumental"
+        }
+    }
+
+    /// Sized to the label; the popover is too narrow for equal segments.
+    var segmentWidth: CGFloat {
+        switch self {
+        case .off: return 44
+        case .vocals: return 60
+        case .instrumental: return 86
         }
     }
 }
