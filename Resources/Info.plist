@@ -2,31 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Transposify</string>
-    <key>CFBundleDisplayName</key>
-    <string>Transposify</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.evanhu.transposify</string>
-    <key>CFBundleExecutable</key>
-    <string>Transposify</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.4</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSAudioCaptureUsageDescription</key>
-    <string>Transposify captures Spotify's audio so it can pitch-shift it in real time.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Transposify needs audio-capture access to read Spotify's audio output.</string>
+	<key>CFBundleDisplayName</key>
+	<string>Transposify</string>
+	<key>CFBundleExecutable</key>
+	<string>Transposify</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.evanhu.transposify</string>
+	<key>CFBundleName</key>
+	<string>Transposify</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Transposify reads Spotify's now-playing track and album art. It never controls playback.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Transposify captures Spotify's audio so it can pitch-shift it in real time.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Transposify needs audio-capture access to read Spotify's audio output.</string>
 </dict>
 </plist>

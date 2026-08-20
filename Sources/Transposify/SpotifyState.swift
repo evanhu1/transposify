@@ -87,6 +87,16 @@ final class SpotifyState {
         current = TrackInfo(id: parts[1], name: parts[2], artist: parts[3])
     }
 
+    /// Re-read now-playing over AppleScript. Called when the popover opens: a
+    /// user-initiated moment is the right time for macOS to show its consent
+    /// prompt, and it also recovers without a relaunch if permission is granted
+    /// in System Settings after the fact.
+    func refreshNowPlaying() {
+        guard isRunning else { return }
+        queryInitialState()
+        onChange?()
+    }
+
     /// Snapshot/testing only: present a fixed now-playing track.
     func injectSnapshotTrack(name: String, artist: String) {
         isRunning = true

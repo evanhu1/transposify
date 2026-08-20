@@ -140,6 +140,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            spotify.refreshNowPlaying()
+            if let id = spotify.current?.id { artwork.request(trackID: id) }
             popoverVC.refresh()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
