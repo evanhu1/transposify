@@ -84,9 +84,12 @@ enum SeparationFileTest {
                 } else {
                     idleTicks += 1
                 }
-                // Done once the input is exhausted and the worker has gone quiet
-                // for longer than one hop's worth of wall time.
-                if fed >= input.count && idleTicks > 300 { break }
+                // Done once the input is exhausted and the worker has gone
+                // quiet. The threshold has to clear a single slow inference:
+                // a freshly compiled Core ML model specialises on its first
+                // few predictions and can take seconds, and a tighter bound
+                // silently truncates the output instead of failing.
+                if fed >= input.count && idleTicks > 5_000 { break }   // 10 s
                 if -runStart.timeIntervalSinceNow > 600 {
                     emit("timed out"); break
                 }

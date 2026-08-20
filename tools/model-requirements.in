@@ -1,0 +1,12 @@
+# Direct pins for the HTDemucs -> Core ML conversion.
+#
+# These exact versions are load-bearing: coremltools traces the PyTorch graph,
+# and newer torch changes the trace enough that conversion fails outright
+# ("only 0-dimensional arrays can be converted to Python scalars" on torch
+# 2.13). Do not relax them without re-running a full conversion.
+torch==2.8.0
+torchaudio==2.8.0
+demucs==4.0.1
+coremltools==9.0
+numpy==2.0.2
+einops==0.8.2
