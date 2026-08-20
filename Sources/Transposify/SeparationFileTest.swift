@@ -52,9 +52,11 @@ enum SeparationFileTest {
             emit(String(format: "model loaded in %.1fs, nominal delay %.2fs",
                         -started.timeIntervalSinceNow, engine.nominalDelay))
             // TRANSPOSIFY_ISOLATE_VOCALS=1 emits the vocal stem instead.
-            let solo = ProcessInfo.processInfo.environment["TRANSPOSIFY_ISOLATE_VOCALS"] == "1"
-            engine.setIsolateVocals(solo)
-            emit("isolating: \(solo ? "vocals" : "instrumental")")
+            let requested = ProcessInfo.processInfo.environment["TRANSPOSIFY_ISOLATE"] ?? "instrumental"
+            let mode: SeparationMode = requested == "vocals" ? .vocals
+                : requested == "off" ? .passthrough : .instrumental
+            engine.setMode(mode)
+            emit("mode: \(requested)")
             engine.start()
 
             var produced: [Float] = []
@@ -63,6 +65,11 @@ enum SeparationFileTest {
             var idleTicks = 0
             var drain = [Float](repeating: 0, count: 1 << 16)
 
+            // TRANSPOSIFY_SWITCH_AT=<seconds> flips mode mid-stream, so the
+            // cutover can be checked for gaps, repeats or drift.
+            let switchAt = Double(
+                ProcessInfo.processInfo.environment["TRANSPOSIFY_SWITCH_AT"] ?? "") ?? -1
+            var switched = switchAt < 0
             let runStart = Date()
             while true {
                 if fed < input.count {
@@ -81,6 +88,13 @@ enum SeparationFileTest {
                 if got > 0 {
                     produced.append(contentsOf: drain[0..<got])
                     idleTicks = 0
+                    if !switched,
+                       Double(produced.count / channels) / captureRate >= switchAt {
+                        switched = true
+                        engine.setMode(.instrumental)
+                        emit(String(format: "  switched to instrumental at %.2fs",
+                                    Double(produced.count / channels) / captureRate))
+                    }
                 } else {
                     idleTicks += 1
                 }

@@ -18,6 +18,14 @@ enum IsolateTrack: String, CaseIterable {
     /// Both isolating modes need the model, and both add the pipeline's ~2 s.
     var isolating: Bool { self != .off }
 
+    var separationMode: SeparationMode {
+        switch self {
+        case .off: return .passthrough
+        case .vocals: return .vocals
+        case .instrumental: return .instrumental
+        }
+    }
+
     var title: String {
         switch self {
         case .off: return "Off"
@@ -104,6 +112,8 @@ final class AudioController {
             if let error = self.modelLoader.error, self.isolate.isolating {
                 self.lastError = error
             }
+            // Late arrival: the worker picks it up at the next hop boundary.
+            self.separation?.setModel(self.modelLoader.model)
             self.updateEngagement()
             self.onChange?()
         }
@@ -225,24 +235,16 @@ final class AudioController {
             onChange?()
             return
         }
-        let wasIsolating = isolate.isolating
         isolate = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.isolateKey)
-        if mode.isolating {
-            lastError = nil
-            modelLoader.prepare()
-        } else {
-            modelLoader.release()   // the model is large; don't hold it idle
-        }
+        if mode.isolating { lastError = nil; modelLoader.prepare() }
 
-        if engaged && wasIsolating && mode.isolating {
-            // Same pipeline, different stems: no rebuild, no re-prime. The ~2 s
-            // already in flight keeps whatever it was rendered as.
-            separation?.setIsolateVocals(mode == .vocals)
-        } else if engaged && (wasIsolating || mode.isolating) {
-            // Crossing into or out of separation changes the pipeline's shape.
-            disengage()
-        }
+        // The pipeline runs in every mode and is always the same depth, so a
+        // mode change never rebuilds or re-primes: the worker already holds the
+        // history and lookahead it needs, and the next hop comes out in the new
+        // mode. If the model is still loading, the worker keeps passing audio
+        // through and switches the moment it lands.
+        separation?.setMode(mode.separationMode)
         updateEngagement()
         onChange?()
     }
@@ -296,7 +298,7 @@ final class AudioController {
         // The separation path can't start until its model is resident. The
         // headless self-test stubs the audio out entirely, so it has no model
         // to wait for.
-        if isolate.isolating && modelLoader.model == nil && testHooks == nil { return false }
+        // Passthrough needs no model, so engagement never waits on one.
         return true
     }
 
@@ -362,23 +364,21 @@ final class AudioController {
 
             // The neural path sits between capture and pitch shifting and is
             // format-preserving, so PitchEngine just reads a different ring.
-            var sourceRing = capture.ring!
-            if isolate.isolating {
-                guard let model = modelLoader.model else {
-                    throw SeparationEngine.StartError.modelMissing
-                }
-                let separation = try SeparationEngine(
-                    captureRate: capture.sampleRate,
-                    channels: capture.channelCount,
-                    inputRing: capture.ring,
-                    model: model)
-                separation.setIsolateVocals(isolate == .vocals)
-                separation.start()
-                self.separation = separation
-                sourceRing = separation.outputRing
-                priming = true
-                startSeparationWatchdog()
-            }
+            // The separation stage runs in every mode, even Off, where it is
+            // just a delay line and costs no GPU. That uniform delay is what
+            // makes switching seamless: without it, going from a live stream to
+            // a delayed one has to gap, repeat, or bend time.
+            let separation = try SeparationEngine(
+                captureRate: capture.sampleRate,
+                channels: capture.channelCount,
+                inputRing: capture.ring,
+                model: modelLoader.model)
+            separation.setMode(isolate.separationMode)
+            separation.start()
+            self.separation = separation
+            let sourceRing = separation.outputRing
+            priming = true
+            startSeparationWatchdog()
 
             let engine = PitchEngine(sampleRate: capture.sampleRate,
                                      channels: capture.channelCount, ring: sourceRing)
@@ -460,6 +460,7 @@ final class AudioController {
         separation?.stop(); separation = nil
         capture?.stop(); capture = nil
         priming = false
+        modelLoader.release()    // held only while audio is actually flowing
         pendingSemitones = nil   // next engage seeds engine.semitones directly
         engaged = false
         if wasEngaged { log.notice("disengaged (passthrough)") }

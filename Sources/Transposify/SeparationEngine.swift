@@ -13,6 +13,23 @@ private final class Flag: @unchecked Sendable {
     func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
 }
 
+/// Which stems the worker emits. Passthrough runs the same window and hop
+/// machinery but copies the input instead of predicting, so the *timing* is
+/// identical and switching costs nothing but a flag.
+enum SeparationMode: Int {
+    case passthrough = 0
+    case vocals = 1
+    case instrumental = 2
+}
+
+private final class Box<T>: @unchecked Sendable {
+    private var value: T
+    private let lock = NSLock()
+    init(_ initial: T) { value = initial }
+    func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ newValue: T) { lock.lock(); value = newValue; lock.unlock() }
+}
+
 /// Monotonic frame counter written by the worker, read from the main thread.
 private final class Counter: @unchecked Sendable {
     private var value = 0
@@ -86,7 +103,7 @@ final class SeparationEngine {
     private let captureRate: Double
     private let channels: Int
 
-    private let model: MLModel
+    private let modelBox: Box<MLModel?>
     private let inputArray: MLMultiArray
     private let featureProvider: MLDictionaryFeatureProvider
 
@@ -108,7 +125,7 @@ final class SeparationEngine {
     private let shouldRun = Flag(false)
     private let exited = DispatchSemaphore(value: 0)
     private let gate = Flag(true)
-    private let isolateVocals = Flag(false)
+    private let modeBox = Box(SeparationMode.passthrough)
     private let finalDrainPending = Flag(false)
     private let stagedCounter = Counter()
     private let publishedCounter = Counter()
@@ -129,10 +146,18 @@ final class SeparationEngine {
 
     // MARK: - Transport support
 
-    /// Emit the vocal stem instead of everything else. Free: the model returns
-    /// all four stems on every window either way, so this only changes which
-    /// ones get summed. Safe to flip mid-stream — no rebuild, no re-prime.
-    func setIsolateVocals(_ on: Bool) { isolateVocals.set(on) }
+    /// Change what the worker emits. Safe to call at any time: the window
+    /// already holds the history *and* lookahead every mode needs, so the next
+    /// hop comes out in the new mode and the raised-cosine crossfade joins it
+    /// to the previous one. No rebuild, no re-prime, no gap.
+    func setMode(_ mode: SeparationMode) { modeBox.set(mode) }
+
+    /// Hand over the model once it finishes loading. Until then the worker runs
+    /// passthrough, so audio keeps playing and the switch to separated output
+    /// happens at a hop boundary whenever the model turns up.
+    func setModel(_ model: MLModel?) { modelBox.set(model) }
+
+    var hasModel: Bool { modelBox.get() != nil }
 
     /// Open while Spotify is playing. Closing schedules one final staging pass
     /// so audio captured *before* the pause — still sitting in the capture ring
@@ -167,11 +192,11 @@ final class SeparationEngine {
     init(captureRate: Double,
          channels: Int,
          inputRing: RingBuffer,
-         model: MLModel,
+         model: MLModel?,
          hopSeconds: Double = 1.0,
          lookaheadSeconds: Double = 1.0,
          crossfadeSeconds: Double = 0.020) throws {
-        self.model = model
+        self.modelBox = Box(model)
         self.captureRate = captureRate
         self.channels = max(1, min(2, channels))
         self.inputRing = inputRing
@@ -346,8 +371,16 @@ final class SeparationEngine {
         stagingR.removeFirst(needed)
         primed = true
 
-        guard let output = predict() else { return true }
-        buildEmitRegion(from: output)
+        // Separate when asked and able; otherwise copy the window through.
+        // Both paths emit the same region of the same window, so the delay is
+        // identical and a switch is inaudible apart from the crossfade.
+        let mode = modeBox.get()
+        var separated: MLMultiArray?
+        if mode != .passthrough, modelBox.get() != nil {
+            guard let output = predict() else { return true }
+            separated = output
+        }
+        buildEmitRegion(from: separated, mode: mode)
         publish()
         return true
     }
@@ -371,6 +404,7 @@ final class SeparationEngine {
     }
 
     private func predict() -> MLMultiArray? {
+        guard let model = modelBox.get() else { return nil }
         do {
             let out = try model.prediction(from: featureProvider)
             return out.featureValue(for: Self.outputFeature)?.multiArrayValue
@@ -384,8 +418,7 @@ final class SeparationEngine {
 
     /// Sum the non-vocal stems over the emit region, apply the crossfade
     /// envelope, and overlap-add the previous window's tail.
-    private func buildEmitRegion(from sources: MLMultiArray) {
-        let strides = sources.strides.map(\.intValue)
+    private func buildEmitRegion(from sources: MLMultiArray?, mode: SeparationMode) {
         let elen = emitFrames
         let start = pastFrames - crossfadeFrames
         let n = rampFrames
@@ -394,29 +427,44 @@ final class SeparationEngine {
 
         emitL.withUnsafeMutableBufferPointer { l in
             emitR.withUnsafeMutableBufferPointer { r in
-                let soloVocals = self.isolateVocals.get()
-                func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
-                    for s in 0..<Self.sourceCount
-                    where soloVocals ? (s == Self.vocalSourceIndex)
-                                     : (s != Self.vocalSourceIndex) {
-                        let lBase = s * strides[1]
-                        let rBase = s * strides[1] + strides[2]
-                        var f = 0
-                        while f < elen {
-                            let i = (start + f) * strides[3]
-                            l[f] += Float(p[lBase + i])
-                            r[f] += Float(p[rBase + i])
-                            f += 1
+                if let sources {
+                    let strides = sources.strides.map(\.intValue)
+                    let soloVocals = (mode == .vocals)
+                    func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
+                        for s in 0..<Self.sourceCount
+                        where soloVocals ? (s == Self.vocalSourceIndex)
+                                         : (s != Self.vocalSourceIndex) {
+                            let lBase = s * strides[1]
+                            let rBase = s * strides[1] + strides[2]
+                            var f = 0
+                            while f < elen {
+                                let i = (start + f) * strides[3]
+                                l[f] += Float(p[lBase + i])
+                                r[f] += Float(p[rBase + i])
+                                f += 1
+                            }
                         }
                     }
-                }
-                switch sources.dataType {
-                case .float32: gather(sources.dataPointer.assumingMemoryBound(to: Float.self))
-                case .float16: gather(sources.dataPointer.assumingMemoryBound(to: Float16.self))
-                default:
-                    log.error("unexpected model output dtype \(sources.dataType.rawValue)")
-                    failureBox.set("Unexpected model output type.")
-                    return
+                    switch sources.dataType {
+                    case .float32: gather(sources.dataPointer.assumingMemoryBound(to: Float.self))
+                    case .float16: gather(sources.dataPointer.assumingMemoryBound(to: Float16.self))
+                    default:
+                        log.error("unexpected model output dtype \(sources.dataType.rawValue)")
+                        failureBox.set("Unexpected model output type.")
+                        return
+                    }
+                } else {
+                    // Passthrough: the same region of the same window, copied
+                    // straight from the input. Identical timing to a predicted
+                    // hop, which is what makes the switch seamless.
+                    let W = Self.windowFrames
+                    let base = inputArray.dataPointer.assumingMemoryBound(to: Float.self)
+                    var f = 0
+                    while f < elen {
+                        l[f] = base[start + f]
+                        r[f] = base[W + start + f]
+                        f += 1
+                    }
                 }
 
                 // Fade in over the first `n`, fade out over the last `n`.
