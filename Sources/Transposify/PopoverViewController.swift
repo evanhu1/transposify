@@ -176,9 +176,9 @@ final class PopoverViewController: NSViewController {
             isolatePicker.setWidth(mode.segmentWidth, forSegment: i)
         }
         isolatePicker.setToolTip("Play the mix untouched.", forSegment: 0)
-        isolatePicker.setToolTip("Keep the vocal, drop the backing. Adds ~2 s of delay.",
+        isolatePicker.setToolTip("Keep the vocal, drop the backing.",
                                  forSegment: 1)
-        isolatePicker.setToolTip("Remove the vocal, keep the backing. Adds ~2 s of delay.",
+        isolatePicker.setToolTip("Remove the vocal, keep the backing.",
                                  forSegment: 2)
 
         let karaokeRow = pickerRow("Isolate", isolatePicker)
@@ -355,8 +355,8 @@ final class PopoverViewController: NSViewController {
     private func pickerRow(_ title: String, _ control: NSControl) -> NSStackView {
         control.setContentHuggingPriority(.required, for: .horizontal)
         return toggleRow(title, control, tooltip:
-            "Keep only the vocal, or only the backing. Both add about two "
-            + "seconds of delay; the mix plays untouched when off.")
+            "Keep only the vocal, or only the backing. Switching is seamless — "
+            + "the audio never stops and never jumps.")
     }
 
     private func stepButton(_ symbol: String, _ action: Selector) -> NSButton {

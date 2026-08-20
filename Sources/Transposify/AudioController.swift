@@ -169,7 +169,7 @@ final class AudioController {
     private var disengageWork: DispatchWorkItem?
     private var reconfiguring = false
 
-    /// A track change reaches the ears ~2 s after Spotify reports it (the
+    /// A track change reaches the ears ~0.6 s after Spotify reports it (the
     /// separation pipeline's depth), so the new track's saved transpose must
     /// wait for its audio. `target` is the staged-frame position of the
     /// boundary; the watchdog applies `value` once consumption passes it.

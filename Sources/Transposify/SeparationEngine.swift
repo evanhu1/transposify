@@ -49,9 +49,13 @@ private final class Counter: @unchecked Sendable {
 ///    device's rate (48 kHz here), so the worker resamples both ways. Measured
 ///    cost of that round trip is ~55 dB SNR — far below the separation error.
 /// 2. Emitting a hop needs `lookahead` seconds of *future* context, so output
-///    trails input by `hop + lookahead + inference` (~2.1 s at the defaults).
-///    That is affordable because you sing along *to* the output, but it is why
-///    this is a distinct mode from the zero-latency mid/side reduction.
+///    trails input by `hop + lookahead + inference` — ~0.6 s at the defaults.
+///    Separation cannot be done with less, and because switching modes has to
+///    be seamless, every mode carries the same delay (see `SeparationMode`).
+///    Measured quality is flat from 2.1 s down to 0.5 s of delay — 22-23 dB
+///    against the offline ceiling either way — so the latency was never
+///    buying fidelity. A smaller hop costs GPU instead, and only while
+///    actually separating: passthrough runs no inference at all.
 ///
 /// Adjacent predictions are joined with a raised-cosine crossfade, so window
 /// seams are inaudible.
@@ -79,6 +83,10 @@ final class SeparationEngine {
     static let windowFrames = 343_980          // 7.8 s at 44.1 kHz
     static let inputFeature = "audio"
     static let outputFeature = "sources"
+    /// Streaming defaults. Delay is hop + lookahead + inference (~0.6 s).
+    static let defaultHopSeconds = 0.25
+    static let defaultLookaheadSeconds = 0.25
+
     /// The converter emits [vocals, drums, bass, other].
     static let vocalSourceIndex = 0
     static let sourceCount = 4
@@ -193,8 +201,8 @@ final class SeparationEngine {
          channels: Int,
          inputRing: RingBuffer,
          model: MLModel?,
-         hopSeconds: Double = 1.0,
-         lookaheadSeconds: Double = 1.0,
+         hopSeconds: Double = SeparationEngine.defaultHopSeconds,
+         lookaheadSeconds: Double = SeparationEngine.defaultLookaheadSeconds,
          crossfadeSeconds: Double = 0.020) throws {
         self.modelBox = Box(model)
         self.captureRate = captureRate

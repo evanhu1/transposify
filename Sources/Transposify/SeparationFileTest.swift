@@ -46,9 +46,14 @@ enum SeparationFileTest {
 
             let ring = RingBuffer(capacityFloats: Int(captureRate * 1.5) * channels)
             let started = Date()
+            let env = ProcessInfo.processInfo.environment
+            let hop = Double(env["TRANSPOSIFY_HOP"] ?? "")
+                ?? SeparationEngine.defaultHopSeconds
+            let look = Double(env["TRANSPOSIFY_LOOKAHEAD"] ?? "")
+                ?? SeparationEngine.defaultLookaheadSeconds
             let engine = try SeparationEngine(
                 captureRate: captureRate, channels: channels, inputRing: ring,
-                model: model)
+                model: model, hopSeconds: hop, lookaheadSeconds: look)
             emit(String(format: "model loaded in %.1fs, nominal delay %.2fs",
                         -started.timeIntervalSinceNow, engine.nominalDelay))
             // TRANSPOSIFY_ISOLATE_VOCALS=1 emits the vocal stem instead.
