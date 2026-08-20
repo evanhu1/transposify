@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let spotify = SpotifyState()
     private let controller = AudioController()
     private let popover = NSPopover()
+    private let artwork = ArtworkStore()
     private var statusItem: NSStatusItem!
     private var popoverVC: PopoverViewController!
 
@@ -50,7 +51,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.imageHugsTitle = true
         }
 
-        popoverVC = PopoverViewController(controller: controller, spotify: spotify)
+        popoverVC = PopoverViewController(controller: controller, spotify: spotify,
+                                          artwork: artwork)
+        // Prefetch on track change so the art is already there when the popover
+        // opens, rather than appearing a beat later.
+        artwork.onChange = { [weak self] in
+            DispatchQueue.main.async { self?.popoverVC.refresh() }
+        }
         popover.contentViewController = popoverVC
         popover.behavior = .transient
 
@@ -112,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func syncSpotifyToController() {
+        if let id = spotify.current?.id { artwork.request(trackID: id) }
         controller.spotifyUpdate(running: spotify.isRunning,
                                  playing: spotify.isPlaying,
                                  trackID: spotify.current?.id)
@@ -223,6 +231,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.setSemitones(2)
 
         let vc = PopoverViewController(controller: controller, spotify: spotify)
+        if let art = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_ART"],
+           let image = NSImage(contentsOfFile: art) {
+            vc.seedArtwork(image, for: "snapshot")
+        }
         let content = vc.view
         content.appearance = NSAppearance(named: .darkAqua)
         content.layoutSubtreeIfNeeded()

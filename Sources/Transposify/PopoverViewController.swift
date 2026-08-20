@@ -31,6 +31,10 @@ final class PopoverViewController: NSViewController {
     private let controller: AudioController
     private let spotify: SpotifyState
 
+    private static let artworkSize: CGFloat = 40
+    private let artworkView = NSImageView()
+    private let artworkTile = NSView()
+    private let artwork: ArtworkStore
     private let trackLabel = NSTextField(labelWithString: "")
     private let artistLabel = NSTextField(labelWithString: "")
     private let valueLabel = NSTextField(labelWithString: "0")
@@ -49,9 +53,11 @@ final class PopoverViewController: NSViewController {
     /// Rows greyed out (and disabled) while the app is switched off.
     private var inactiveWhenOff: [NSView] = []
 
-    init(controller: AudioController, spotify: SpotifyState) {
+    init(controller: AudioController, spotify: SpotifyState,
+         artwork: ArtworkStore = ArtworkStore()) {
         self.controller = controller
         self.spotify = spotify
+        self.artwork = artwork
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -61,11 +67,33 @@ final class PopoverViewController: NSViewController {
         let width: CGFloat = 296
 
         // Now playing ------------------------------------------------------
-        let nowIcon = NSImageView()
-        nowIcon.image = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        nowIcon.contentTintColor = .tertiaryLabelColor
-        nowIcon.setContentHuggingPriority(.required, for: .horizontal)
+        // Album art, with the note glyph as the placeholder it falls back to
+        // when there is no track or no Automation permission.
+        //
+        // The image view goes inside a plain container: NSImageView sizes
+        // itself from its image and ignored width/height constraints outright
+        // (it came out 40.5 x 47.5 with three required constraints attached
+        // and no conflict logged). A plain NSView honours them, and pinning
+        // the image to its edges keeps the tile square.
+        artworkView.imageScaling = .scaleProportionallyUpOrDown
+        artworkView.translatesAutoresizingMaskIntoConstraints = false
+
+        artworkTile.wantsLayer = true
+        artworkTile.layer?.cornerRadius = 6
+        artworkTile.layer?.masksToBounds = true
+        artworkTile.layer?.backgroundColor = NSColor(white: 0.5, alpha: 0.16).cgColor
+        artworkTile.translatesAutoresizingMaskIntoConstraints = false
+        artworkTile.setContentHuggingPriority(.required, for: .horizontal)
+        artworkTile.setContentHuggingPriority(.required, for: .vertical)
+        artworkTile.addSubview(artworkView)
+        NSLayoutConstraint.activate([
+            artworkTile.widthAnchor.constraint(equalToConstant: Self.artworkSize),
+            artworkTile.heightAnchor.constraint(equalToConstant: Self.artworkSize),
+            artworkView.leadingAnchor.constraint(equalTo: artworkTile.leadingAnchor),
+            artworkView.trailingAnchor.constraint(equalTo: artworkTile.trailingAnchor),
+            artworkView.topAnchor.constraint(equalTo: artworkTile.topAnchor),
+            artworkView.bottomAnchor.constraint(equalTo: artworkTile.bottomAnchor),
+        ])
 
         trackLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         trackLabel.lineBreakMode = .byTruncatingTail
@@ -76,10 +104,9 @@ final class PopoverViewController: NSViewController {
         artistLabel.lineBreakMode = .byTruncatingTail
         artistLabel.maximumNumberOfLines = 1
 
-        let titleRow = NSStackView(views: [nowIcon, trackLabel])
+        let titleRow = NSStackView(views: [trackLabel])
         titleRow.orientation = .horizontal
         titleRow.alignment = .firstBaseline
-        titleRow.spacing = 6
         let nowRow = NSStackView(views: [titleRow, artistLabel])
         nowRow.orientation = .vertical
         nowRow.alignment = .leading
@@ -100,7 +127,7 @@ final class PopoverViewController: NSViewController {
 
         let nowSpacer = NSView()
         nowSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let nowHeader = NSStackView(views: [nowRow, nowSpacer, powerButton])
+        let nowHeader = NSStackView(views: [artworkTile, nowRow, nowSpacer, powerButton])
         nowHeader.orientation = .horizontal
         nowHeader.alignment = .centerY
         nowHeader.spacing = 8
@@ -254,6 +281,7 @@ final class PopoverViewController: NSViewController {
         nowRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
+        artwork.onChange = { [weak self] in self?.refresh() }
         inactiveWhenOff = [header, sliderRow, karaokeRow]
         view = container
     }
@@ -294,6 +322,8 @@ final class PopoverViewController: NSViewController {
             artistLabel.isHidden = true
             artistLabel.toolTip = nil
         }
+
+        updateArtwork()
 
         let s = controller.semitones
         valueLabel.stringValue = s == 0 ? "0" : (s > 0 ? "+\(s)" : "\u{2212}\(abs(s))")
@@ -390,6 +420,28 @@ final class PopoverViewController: NSViewController {
         controller.setSemitones(value)
     }
     @objc private func powerToggled() { controller.setEnabled(!controller.enabled) }
+    /// Snapshot/testing only.
+
+    /// Snapshot/testing only.
+    func seedArtwork(_ image: NSImage, for trackID: String) {
+        artwork.seed(image, for: trackID)
+    }
+
+    /// Album art for the current track, or the note placeholder. Requesting is
+    /// cheap and idempotent; the store calls back when an image arrives.
+    private func updateArtwork() {
+        let trackID = spotify.current?.id ?? ""
+        if let image = artwork.image(for: trackID) {
+            artworkView.image = image
+            artworkView.contentTintColor = nil
+        } else {
+            artworkView.image = NSImage(systemSymbolName: "music.note",
+                                        accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 15, weight: .medium))
+            artworkView.contentTintColor = .tertiaryLabelColor
+        }
+    }
+
     /// The model row is the only place "Best" explains itself, so it carries
     /// the size up front, live progress, and any failure — rather than leaving
     /// a greyed-out segment with no explanation.

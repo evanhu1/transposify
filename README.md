@@ -94,7 +94,9 @@ in memory (on the order of a gigabyte) only while `Best` is selected.
 
 Click the menu-bar item to open the popup:
 
-- **Now playing** — current track + artist.
+- **Now playing** — album art, track and artist. Art comes from Spotify's
+  AppleScript interface, so it needs Automation permission; without it the
+  popover just shows a placeholder.
 - **Transpose** — `−` / value / `+`, or the slider (±12 semitones). *Reset*
   (↺) appears when shifted.
 - **Isolate** — `Off` / `Vocals` / `Instrumental`.
