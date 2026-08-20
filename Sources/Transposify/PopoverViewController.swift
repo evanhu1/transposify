@@ -41,16 +41,17 @@ final class PopoverViewController: NSViewController {
     private let slider = NSSlider()
     private let resetButton = NSButton()
     private let powerButton = NSButton()
-    private let isolatePicker = NSSegmentedControl()
-    private let advancedButton = NSButton()
-    private var stemChecks: [Stem: NSButton] = [:]
-    private var stemGrid: NSStackView!
-    private var isolateRowStack: NSStackView!
+    private let presetPicker = NSSegmentedControl()
+    private var stemRows: NSStackView!
+    private var stemPickers: [NSSegmentedControl] = []
+    private var isolateSection: NSStackView!
+    private var builtStemCount = 0
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
     private var modelRow: NSStackView!
     private let rememberSwitch = NSSwitch()
-    private let loginSwitch = NSSwitch()
+    private let loginCheckbox = NSButton(
+        checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private var minusButton: NSButton!
     private var plusButton: NSButton!
 
@@ -192,76 +193,51 @@ final class PopoverViewController: NSViewController {
 
         // Toggles ----------------------------------------------------------
         configure(rememberSwitch, #selector(rememberToggled))
-        configure(loginSwitch, #selector(loginToggled))
+        loginCheckbox.controlSize = .small
+        loginCheckbox.font = .systemFont(ofSize: 12)
+        loginCheckbox.contentTintColor = .secondaryLabelColor
+        loginCheckbox.focusRingType = .none
+        loginCheckbox.target = self
+        loginCheckbox.action = #selector(loginToggled)
+        loginCheckbox.setContentHuggingPriority(.required, for: .horizontal)
 
-        // Segment widths are explicit: the popover is 296 pt wide, and three
-        // auto-sized segments plus a full-length row label overflow it.
-        isolatePicker.segmentStyle = .rounded
-        isolatePicker.segmentCount = IsolateTrack.allCases.count
-        isolatePicker.focusRingType = .none
-        isolatePicker.font = .systemFont(ofSize: 12)
-        isolatePicker.target = self
-        isolatePicker.action = #selector(isolateChanged)
-        for (i, mode) in IsolateTrack.allCases.enumerated() {
-            isolatePicker.setLabel(mode.title, forSegment: i)
-            isolatePicker.setWidth(mode.segmentWidth, forSegment: i)
+        // Isolate mirrors the Transpose section: a bare header, then the
+        // control at full width. Presets and stems are two views onto one
+        // piece of state, so they are the same kind of object — one
+        // single-select, one multi-select — stacked.
+        let isolateTitle = NSTextField(labelWithString: "Isolate")
+        isolateTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        isolateTitle.textColor = .secondaryLabelColor
+
+        presetPicker.segmentStyle = .rounded
+        presetPicker.segmentCount = IsolatePreset.allCases.count
+        presetPicker.focusRingType = .none
+        presetPicker.font = .systemFont(ofSize: 12)
+        presetPicker.target = self
+        presetPicker.action = #selector(presetChanged)
+        for (i, preset) in IsolatePreset.allCases.enumerated() {
+            presetPicker.setLabel(preset.title, forSegment: i)
         }
-        isolatePicker.setToolTip("Play the mix untouched.", forSegment: 0)
-        isolatePicker.setToolTip("Keep the vocal, drop the backing.",
-                                 forSegment: 1)
-        isolatePicker.setToolTip("Remove the vocal, keep the backing.",
-                                 forSegment: 2)
+        presetPicker.setToolTip("Play the mix untouched.", forSegment: 0)
+        presetPicker.setToolTip("Keep the vocal, drop the backing.", forSegment: 1)
+        presetPicker.setToolTip("Remove the vocal, keep the backing.", forSegment: 2)
+        presetPicker.setToolTip("Choose stems individually.", forSegment: 3)
 
-        // "Advanced" sits just above the row's right edge and swaps the
-        // three-way switcher for per-stem checkboxes.
-        advancedButton.isBordered = false
-        advancedButton.focusRingType = .none
-        advancedButton.font = .systemFont(ofSize: 11, weight: .medium)
-        advancedButton.contentTintColor = transposeAccent
-        advancedButton.target = self
-        advancedButton.action = #selector(advancedTapped)
-        advancedButton.setContentHuggingPriority(.required, for: .horizontal)
-        let advancedSpacer = NSView()
-        advancedSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let advancedRow = NSStackView(views: [advancedSpacer, advancedButton])
-        advancedRow.orientation = .horizontal
-        advancedRow.alignment = .centerY
+        let stemStack = NSStackView(views: [])
+        stemStack.orientation = .vertical
+        stemStack.alignment = .leading
+        stemStack.spacing = 4
+        stemRows = stemStack
 
-        // Two columns of checkboxes; six stems fit as three rows.
-        var columns: [NSStackView] = []
-        for pair in stride(from: 0, to: Stem.allCases.count, by: 2) {
-            var cells: [NSView] = []
-            for stem in Stem.allCases[pair..<min(pair + 2, Stem.allCases.count)] {
-                let box = NSButton(checkboxWithTitle: stem.title,
-                                   target: self, action: #selector(stemToggled(_:)))
-                box.font = .systemFont(ofSize: 12)
-                box.tag = stem.rawValue
-                box.focusRingType = .none
-                box.widthAnchor.constraint(equalToConstant: 92).isActive = true
-                stemChecks[stem] = box
-                cells.append(box)
-            }
-            let row = NSStackView(views: cells)
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            columns.append(row)
-        }
-        let grid = NSStackView(views: columns)
-        grid.orientation = .vertical
-        grid.alignment = .leading
-        grid.spacing = 4
-        stemGrid = grid
-
-        let pickerLine = pickerRow("Isolate", isolatePicker)
-        let isolateStack = NSStackView(views: [advancedRow, pickerLine, grid])
+        presetPicker.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let isolateStack = NSStackView(views: [isolateTitle, presetPicker, stemStack])
         isolateStack.orientation = .vertical
         isolateStack.alignment = .leading
-        isolateStack.spacing = 6
-        isolateRowStack = isolateStack
-        let karaokeRow = isolateStack
+        isolateStack.spacing = 8
+        isolateSection = isolateStack
+        let karaokeRow: NSView = isolateStack
 
-        // Only shown until the model is on disk (or while it's arriving).
+        // Notice row: model download prompt, or the Automation hint.
         modelLabel.font = .systemFont(ofSize: 11)
         modelLabel.textColor = .secondaryLabelColor
         modelLabel.lineBreakMode = .byTruncatingTail
@@ -274,15 +250,14 @@ final class PopoverViewController: NSViewController {
         modelButton.setContentHuggingPriority(.required, for: .horizontal)
         let modelSpacer = NSView()
         modelSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let modelRow = NSStackView(views: [modelLabel, modelSpacer, modelButton])
-        modelRow.orientation = .horizontal
-        modelRow.alignment = .centerY
-        modelRow.spacing = 8
-        self.modelRow = modelRow
+        let noticeRow = NSStackView(views: [modelLabel, modelSpacer, modelButton])
+        noticeRow.orientation = .horizontal
+        noticeRow.alignment = .centerY
+        noticeRow.spacing = 8
+        modelRow = noticeRow
 
         let rememberRow = toggleRow("Remember key for this song", rememberSwitch,
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
-        let loginRow = toggleRow("Launch at login", loginSwitch, tooltip: nil)
 
         // Footer -----------------------------------------------------------
         let quit = NSButton(title: "Quit", target: self, action: #selector(quitTapped))
@@ -290,8 +265,9 @@ final class PopoverViewController: NSViewController {
         quit.focusRingType = .none
         quit.contentTintColor = .secondaryLabelColor
         quit.font = .systemFont(ofSize: 12)
-        let footer = NSStackView(views: [NSView(), quit])
+        let footer = NSStackView(views: [loginCheckbox, NSView(), quit])
         footer.orientation = .horizontal
+        footer.alignment = .centerY
 
         // Assemble ---------------------------------------------------------
         let divider1 = separator()
@@ -299,7 +275,7 @@ final class PopoverViewController: NSViewController {
         let stack = NSStackView(views: [
             nowHeader, divider1,
             header, sliderRow,
-            karaokeRow, modelRow, rememberRow, loginRow,
+            karaokeRow, modelRow, rememberRow,
             divider2, footer,
         ])
         stack.orientation = .vertical
@@ -311,7 +287,7 @@ final class PopoverViewController: NSViewController {
         stack.setCustomSpacing(14, after: divider1)
         stack.setCustomSpacing(8, after: header)
         stack.setCustomSpacing(18, after: sliderRow)
-        stack.setCustomSpacing(14, after: loginRow)
+        stack.setCustomSpacing(14, after: rememberRow)
         stack.setCustomSpacing(9, after: divider2)
 
         let container = NSView()
@@ -323,8 +299,8 @@ final class PopoverViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        let fullWidth = [nowHeader, divider1, header, sliderRow, karaokeRow, modelRow,
-                         rememberRow, loginRow, divider2, footer]
+        let fullWidth: [NSView] = [nowHeader, divider1, header, sliderRow, karaokeRow,
+                                   modelRow, rememberRow, divider2, footer]
         for v in fullWidth {
             v.setContentHuggingPriority(.defaultLow, for: .horizontal)
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
@@ -383,29 +359,25 @@ final class PopoverViewController: NSViewController {
         resetButton.isEnabled = (s != 0)
         resetButton.alphaValue = (s != 0) ? 1 : 0
 
-        if let index = IsolateTrack.allCases.firstIndex(of: controller.isolate) {
-            isolatePicker.selectedSegment = index
+        rebuildStemPickersIfNeeded()
+        if let index = IsolatePreset.allCases.firstIndex(of: controller.preset) {
+            presetPicker.selectedSegment = index
         }
-        // Both isolating modes need the model; keep them visible but disabled so
-        // the capability is discoverable rather than hidden.
-        for (i, mode) in IsolateTrack.allCases.enumerated() where mode.isolating {
-            isolatePicker.setEnabled(SeparationModel.isInstalled, forSegment: i)
+        for (i, preset) in IsolatePreset.allCases.enumerated() where preset != .all {
+            presetPicker.setEnabled(SeparationModel.isInstalled, forSegment: i)
         }
-        let advanced = controller.advanced
-        advancedButton.title = advanced ? "Simple" : "Advanced"
-        advancedButton.isEnabled = SeparationModel.isInstalled
-        isolatePicker.isHidden = advanced
-        stemGrid.isHidden = !advanced
-        for (stem, box) in stemChecks {
-            // Guitar and piano only exist on a six-stem model.
-            box.isHidden = stem.rawValue >= controller.stemCount
-            box.state = controller.includes(stem) ? .on : .off
+        stemRows.isHidden = !controller.showsStems
+        for picker in stemPickers {
+            for i in 0..<picker.segmentCount {
+                let stem = Stem(rawValue: picker.tag * 3 + i)
+                picker.setSelected(stem.map(controller.includes) ?? false, forSegment: i)
+            }
         }
         refreshModelRow()
         updatePreferredSize()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = (spotify.current != nil)
-        loginSwitch.state = LoginItem.isEnabled ? .on : .off
+        loginCheckbox.state = LoginItem.isEnabled ? .on : .off
 
         let on = controller.enabled
         powerButton.contentTintColor = on ? transposeAccent : .tertiaryLabelColor
@@ -413,7 +385,7 @@ final class PopoverViewController: NSViewController {
             ? "Transposing is on \u{2014} click to just listen"
             : "Transposing is off \u{2014} click to enable"
         for row in inactiveWhenOff { row.alphaValue = on ? 1 : 0.4 }
-        for control in [slider, minusButton, plusButton, resetButton, isolatePicker] as [NSControl] {
+        for control in [slider, minusButton, plusButton, resetButton, presetPicker] as [NSControl] {
             control.isEnabled = on
         }
         // resetButton still hides itself at 0 even when enabled.
@@ -588,24 +560,57 @@ final class PopoverViewController: NSViewController {
         }
     }
 
-    @objc private func advancedTapped() {
-        controller.setAdvanced(!controller.advanced)
+    /// Stems are a multi-select segmented control — the same object as the
+    /// preset row, so the two read as one idea rather than two panels. Rebuilt
+    /// when the model's stem count changes, since segments can't be hidden
+    /// individually.
+    private func rebuildStemPickersIfNeeded() {
+        let count = controller.stemCount
+        guard count != builtStemCount else { return }
+        builtStemCount = count
+        stemPickers.forEach { $0.removeFromSuperview() }
+        stemPickers.removeAll()
+        stemRows.arrangedSubviews.forEach { stemRows.removeArrangedSubview($0); $0.removeFromSuperview() }
+
+        for (row, start) in stride(from: 0, to: count, by: 3).enumerated() {
+            let stems = (start..<min(start + 3, count)).compactMap(Stem.init(rawValue:))
+            let picker = NSSegmentedControl()
+            picker.segmentStyle = .rounded
+            picker.trackingMode = .selectAny          // independent toggles
+            picker.segmentCount = stems.count
+            picker.focusRingType = .none
+            picker.font = .systemFont(ofSize: 12)
+            picker.tag = row
+            picker.target = self
+            picker.action = #selector(stemsChanged(_:))
+            for (i, stem) in stems.enumerated() {
+                picker.setLabel(stem.title, forSegment: i)
+                picker.setWidth(84, forSegment: i)
+            }
+            stemPickers.append(picker)
+            stemRows.addArrangedSubview(picker)
+        }
     }
 
-    @objc private func stemToggled(_ sender: NSButton) {
-        guard let stem = Stem(rawValue: sender.tag) else { return }
-        controller.setStem(stem, included: sender.state == .on)
+    @objc private func stemsChanged(_ sender: NSSegmentedControl) {
+        for i in 0..<sender.segmentCount {
+            guard let stem = Stem(rawValue: sender.tag * 3 + i) else { continue }
+            let on = sender.isSelected(forSegment: i)
+            if on != controller.includes(stem) {
+                controller.setStem(stem, included: on)
+            }
+        }
     }
 
-    @objc private func isolateChanged() {
-        let index = isolatePicker.selectedSegment
-        guard index >= 0, index < IsolateTrack.allCases.count else { return }
-        controller.setIsolate(IsolateTrack.allCases[index])
+    @objc private func presetChanged() {
+        let index = presetPicker.selectedSegment
+        guard index >= 0, index < IsolatePreset.allCases.count else { return }
+        controller.setPreset(IsolatePreset.allCases[index])
     }
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
     @objc private func loginToggled() {
-        LoginItem.set(loginSwitch.state == .on)
-        loginSwitch.state = LoginItem.isEnabled ? .on : .off
+        LoginItem.set(loginCheckbox.state == .on)
+        loginCheckbox.state = LoginItem.isEnabled ? .on : .off
     }
     @objc private func quitTapped() { NSApp.terminate(nil) }
 }

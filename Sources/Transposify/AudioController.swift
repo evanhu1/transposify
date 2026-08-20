@@ -24,59 +24,23 @@ enum Stem: Int, CaseIterable {
     }
 }
 
-/// Which part of the mix to keep. Both isolating modes run the same HTDemucs
-/// pass — the model returns all four stems on every window, so choosing vocals
-/// instead of everything-else only changes which stems get summed. Neither
-/// costs more than the other.
-enum IsolateTrack: String, CaseIterable {
-    /// Leave the mix alone.
-    case off
-    /// Keep the vocal, drop the backing.
-    case vocals
-    /// Keep the backing, drop the vocal.
-    case instrumental
-
-    /// Both isolating modes need the model, and both add the pipeline's ~2 s.
-    var isolating: Bool { self != .off }
-
-    /// Which stems the simple three-way switcher maps to.
-    func selection(stemCount: Int) -> StemSelection {
-        switch self {
-        case .off:
-            return .passthrough
-        case .vocals:
-            return .stems(mask: 1 << Stem.vocalsIndex)
-        case .instrumental:
-            let all = (0..<stemCount).filter { $0 != Stem.vocalsIndex }
-            return .stems(mask: StemSelection.mask(all))
-        }
-    }
+/// Named stem sets. These are *shortcuts*, not a separate mode: the truth is
+/// always the stem mask, and a preset is simply the name of a common one.
+/// `custom` is the odd one out — it selects nothing, it only reveals the
+/// per-stem controls.
+enum IsolatePreset: String, CaseIterable {
+    case all, vocals, backing, custom
 
     var title: String {
         switch self {
-        case .off: return "Off"
+        case .all: return "All"
         case .vocals: return "Vocals"
-        case .instrumental: return "Instrumental"
-        }
-    }
-
-    /// Sized to the label; the popover is too narrow for equal segments.
-    var segmentWidth: CGFloat {
-        switch self {
-        case .off: return 44
-        case .vocals: return 60
-        case .instrumental: return 86
+        case .backing: return "Backing"
+        case .custom: return "Custom"
         }
     }
 }
 
-/// Owns the capture + pitch pipeline and decides when it should run.
-///
-/// Core rule: the tap is engaged **only** while Spotify is playing AND there's
-/// something to do (`semitones != 0` or vocal reduction on). With nothing to do
-/// the pipeline is fully torn down, so Spotify plays untouched, bit-perfect,
-/// with zero added latency. Transpose is remembered per Spotify track; vocal
-/// reduction is a global preference.
 final class AudioController {
     enum Mode: Equatable {
         case shifting(Int)
@@ -95,14 +59,11 @@ final class AudioController {
     /// untouched — lets you just listen without quitting. Persisted across launches.
     private(set) var enabled: Bool
 
-    /// Isolation is a global preference, not per-song: it applies to whatever
-    /// is playing and persists across launches.
-    private(set) var isolate: IsolateTrack
+    /// Which preset is highlighted. Derived state for the UI — the stem mask
+    /// below is what actually drives the audio.
+    private(set) var preset: IsolatePreset
 
-    /// Advanced replaces the three-way switcher with per-stem checkboxes. The
-    /// mask is remembered independently, so flipping Advanced off and on again
-    /// returns to the same selection.
-    private(set) var advanced: Bool
+    /// The single source of truth: which stems reach the output.
     private(set) var stemMask: Int
     /// How many stems existed when `stemMask` was last saved. A model with more
     /// stems turns the new ones on rather than leaving them silently off — the
@@ -132,34 +93,38 @@ final class AudioController {
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
-        if let raw = defaults.string(forKey: Self.isolateKey),
-           let stored = IsolateTrack(rawValue: raw) {
-            isolate = stored
+        // Migrate: before presets and stems were unified, the audible state was
+        // either `isolateTrack` (simple) or `stemMask` (advanced), depending on
+        // an `advanced` flag. Collapse that into a single mask.
+        let wasAdvanced = defaults.bool(forKey: Self.advancedKey)
+        let storedMask = defaults.object(forKey: Self.stemMaskKey) as? Int
+        let allFour = StemSelection.mask([0, 1, 2, 3])
+        if wasAdvanced, let storedMask {
+            stemMask = storedMask
+            preset = .custom
         } else {
-            // Migrate the older three-way mode. "best" removed the vocal, which
-            // is now "only instrumental". "fast" was the mid/side approximation
-            // and has no equivalent, so it lands on off rather than silently
-            // opting someone into a mode that adds two seconds of latency.
-            switch defaults.string(forKey: Self.reductionKey) {
-            case "best": isolate = .instrumental
-            default: isolate = .off
+            switch defaults.string(forKey: Self.isolateKey) {
+            case "vocals":
+                stemMask = 1 << Stem.vocalsIndex
+                preset = .vocals
+            case "instrumental":
+                stemMask = allFour & ~(1 << Stem.vocalsIndex)
+                preset = .backing
+            default:
+                stemMask = allFour
+                preset = .all
             }
         }
-        if isolate.isolating && !SeparationModel.isInstalled {
-            isolate = .off
-        }
-        advanced = defaults.bool(forKey: Self.advancedKey)
-        let storedMask = defaults.object(forKey: Self.stemMaskKey) as? Int
-        // Default to everything except vocals — the common case, and it makes
-        // the first look at Advanced show something sensible rather than blank.
-        stemMask = storedMask ?? StemSelection.mask([1, 2, 3])
         knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
-        if advanced && !SeparationModel.isInstalled { advanced = false }
+        if preset != .all && !SeparationModel.isInstalled {
+            stemMask = allFour
+            preset = .all
+        }
         // Loading is slow, so it happens off the main thread; engagement waits
         // for readiness rather than blocking on it.
         modelLoader.onChange = { [weak self] in
             guard let self else { return }
-            if let error = self.modelLoader.error, self.isolate.isolating || self.advanced {
+            if let error = self.modelLoader.error, self.needsModel {
                 self.lastError = error
             }
             self.adoptNewStemsIfAny()
@@ -169,14 +134,14 @@ final class AudioController {
             self.updateEngagement()
             self.onChange?()
         }
-        if isolate.isolating || advanced { modelLoader.prepare() }
+        if needsModel { modelLoader.prepare() }
 
         modelInstaller.onChange = { [weak self] in
             guard let self else { return }
             if case .installed = self.modelInstaller.state,
                let wanted = self.wantedModeWhenInstalled {
                 self.wantedModeWhenInstalled = nil
-                self.setIsolate(wanted)
+                self.setPreset(wanted)
             }
             self.onChange?()
         }
@@ -184,9 +149,9 @@ final class AudioController {
 
     /// Downloads the separation model, then switches to the mode the user was
     /// reaching for — they asked for the mode, not for a file.
-    func downloadModel(then mode: IsolateTrack = .instrumental) {
+    func downloadModel(then wanted: IsolatePreset = .backing) {
         guard !SeparationModel.isInstalled else { return }
-        wantedModeWhenInstalled = mode
+        wantedModeWhenInstalled = wanted
         lastError = nil
         modelInstaller.start()
         onChange?()
@@ -200,7 +165,13 @@ final class AudioController {
 
     /// True while the model is still loading and "Best" is selected — the UI
     /// shows this rather than looking broken during a cold load.
-    var preparingModel: Bool { (isolate.isolating || advanced) && modelLoader.isLoading }
+    /// The model is only needed when some stem is actually being dropped.
+    var needsModel: Bool { !currentSelection.isPassthrough || preset == .custom }
+
+    var preparingModel: Bool { needsModel && modelLoader.isLoading }
+
+    /// Per-stem controls are showing.
+    var showsStems: Bool { preset == .custom }
 
     private var currentTrackID: String?
     private var hasTrack = false
@@ -215,7 +186,7 @@ final class AudioController {
     private var separationWatchdog: DispatchSourceTimer?
     private let modelLoader = SeparationModelLoader()
     let modelInstaller = SeparationModelInstaller()
-    private var wantedModeWhenInstalled: IsolateTrack?
+    private var wantedModeWhenInstalled: IsolatePreset?
     private let store = SongSettingsStore()
 
     private var disengageWork: DispatchWorkItem?
@@ -293,18 +264,24 @@ final class AudioController {
     func nudge(_ delta: Int) { setSemitones(semitones + delta) }
     func resetPitch() { setSemitones(0) }
 
-    /// Turn the per-stem view on or off. Purely a presentation switch as far
-    /// as the pipeline is concerned — it just changes which selection applies.
-    func setAdvanced(_ on: Bool) {
-        guard on != advanced else { return }
-        if on && !SeparationModel.isInstalled {
+    /// Choose a preset. `custom` only reveals the per-stem controls; it never
+    /// changes what you hear, so opening it is always safe.
+    func setPreset(_ new: IsolatePreset) {
+        if new != .all && !SeparationModel.isInstalled {
             lastError = SeparationModel.installHint
             onChange?()
             return
         }
-        advanced = on
-        UserDefaults.standard.set(on, forKey: Self.advancedKey)
-        if on { modelLoader.prepare() } else { releaseModelIfIdle() }
+        preset = new
+        let available = (1 << stemCount) - 1
+        switch new {
+        case .all: stemMask = available
+        case .vocals: stemMask = 1 << Stem.vocalsIndex
+        case .backing: stemMask = available & ~(1 << Stem.vocalsIndex)
+        case .custom: break          // reveal only
+        }
+        persistSelection()
+        if needsModel { lastError = nil; modelLoader.prepare() } else { releaseModelIfIdle() }
         applySelection()
         updateEngagement()
         onChange?()
@@ -315,20 +292,35 @@ final class AudioController {
         let updated = included ? (stemMask | bit) : (stemMask & ~bit)
         guard updated != stemMask else { return }
         stemMask = updated
-        UserDefaults.standard.set(stemMask, forKey: Self.stemMaskKey)
-        UserDefaults.standard.set(stemCount, forKey: Self.stemMaskCountKey)
+        // Editing stems is what "custom" means; stay there rather than snapping
+        // the highlight to whichever preset the mask happens to match.
+        preset = .custom
+        persistSelection()
+        if needsModel { modelLoader.prepare() }
         applySelection()
+        updateEngagement()
         onChange?()
     }
 
     func includes(_ stem: Stem) -> Bool { stemMask & (1 << stem.rawValue) != 0 }
 
-    /// What the worker should emit, given the current mode.
+    private func persistSelection() {
+        let defaults = UserDefaults.standard
+        defaults.set(stemMask, forKey: Self.stemMaskKey)
+        defaults.set(stemCount, forKey: Self.stemMaskCountKey)
+        defaults.set(preset.rawValue, forKey: Self.isolateKey)
+        defaults.set(preset == .custom, forKey: Self.advancedKey)
+    }
+
+    /// What the worker should emit.
     private var currentSelection: StemSelection {
-        guard advanced else { return isolate.selection(stemCount: stemCount) }
+        // "All" is authoritative. A mask saved when the model had four stems
+        // reads as "everything except guitar and piano" against a six-stem
+        // model, which would engage the pipeline to reproduce the full mix.
+        if preset == .all { return .passthrough }
         let available = (1 << stemCount) - 1
         let mask = stemMask & available
-        // Everything selected is the untouched mix, and passthrough gives that
+        // Everything selected is the untouched mix, which passthrough gives
         // bit-exact and without running the model at all.
         return mask == available ? .passthrough : .stems(mask: mask)
     }
@@ -337,44 +329,19 @@ final class AudioController {
         separation?.setSelection(currentSelection)
     }
 
+    /// A model with more stems than the saved selection knew about turns the
+    /// new ones on — the user never unchecked something that did not exist.
     private func adoptNewStemsIfAny() {
         let count = stemCount
         guard count > knownStemCount else { return }
         for index in knownStemCount..<count { stemMask |= (1 << index) }
         knownStemCount = count
-        UserDefaults.standard.set(stemMask, forKey: Self.stemMaskKey)
-        UserDefaults.standard.set(count, forKey: Self.stemMaskCountKey)
+        persistSelection()
         log.notice("stem selection extended to \(count, privacy: .public) stems")
     }
 
     private func releaseModelIfIdle() {
-        if !advanced && !isolate.isolating { modelLoader.releaseAfterGrace() }
-    }
-
-    func setIsolate(_ mode: IsolateTrack) {
-        guard mode != isolate else { return }
-        if mode.isolating && !SeparationModel.isInstalled {
-            lastError = SeparationModel.installHint
-            onChange?()
-            return
-        }
-        isolate = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: Self.isolateKey)
-        if mode.isolating {
-            lastError = nil
-            modelLoader.prepare()
-        } else {
-            releaseModelIfIdle()
-        }
-
-        // The pipeline runs in every mode and is always the same depth, so a
-        // mode change never rebuilds or re-primes: the worker already holds the
-        // history and lookahead it needs, and the next hop comes out in the new
-        // mode. If the model is still loading, the worker keeps passing audio
-        // through and switches the moment it lands.
-        applySelection()
-        updateEngagement()
-        onChange?()
+        if !needsModel { modelLoader.releaseAfterGrace() }
     }
 
     func setEnabled(_ on: Bool) {
@@ -425,8 +392,9 @@ final class AudioController {
         // Advanced with every stem checked is the untouched mix, so it is not
         // a reason to engage — the tap would mute Spotify to hand back what
         // Spotify was already playing.
-        let advancedChangesAudio = advanced && !currentSelection.isPassthrough
-        guard semitones != 0 || isolate.isolating || advancedChangesAudio else { return false }
+        // A full mix is not a reason to engage: the tap would mute Spotify to
+        // hand back what Spotify was already playing.
+        guard semitones != 0 || !currentSelection.isPassthrough else { return false }
         // The separation path can't start until its model is resident. The
         // headless self-test stubs the audio out entirely, so it has no model
         // to wait for.
@@ -461,7 +429,7 @@ final class AudioController {
             if let engine, !engine.hold {
                 engine.hold = true
                 log.notice("""
-                    held (paused with \(self.isolate.rawValue, privacy: .public) \
+                    held (paused with \(self.preset.rawValue, privacy: .public) \
                     pipeline intact)\(self.flightDescription(), privacy: .public)
                     """)
             }
@@ -486,7 +454,7 @@ final class AudioController {
         if let hooks = testHooks {
             engaged = true
             lastError = nil
-            hooks.engage(semitones, isolate.isolating)
+            hooks.engage(semitones, !currentSelection.isPassthrough)
             onChange?()
             return
         }
@@ -535,7 +503,7 @@ final class AudioController {
             log.notice("""
                 engaged: \(capture.sampleRate, privacy: .public) Hz, \
                 pitch \(self.semitones, privacy: .public) st, \
-                isolate \(self.isolate.rawValue, privacy: .public)
+                stems \(self.stemMask, privacy: .public) (\(self.preset.rawValue, privacy: .public))
                 """)
         } catch {
             disengage()
@@ -652,13 +620,13 @@ final class AudioController {
         }
         if !spotifyRunning { return .notRunning }
         if !enabled { return spotifyPlaying ? .original : .paused }
-        if semitones != 0 || isolate.isolating, !engaged,
+        if !currentSelection.isPassthrough || semitones != 0, !engaged,
            let error = lastError, spotifyPlaying {
             return .error(error)
         }
         if !spotifyPlaying { return .paused }
         if semitones != 0 { return .shifting(semitones) }
-        if isolate.isolating { return .isolating }
+        if !currentSelection.isPassthrough { return .isolating }
         return .original
     }
 }

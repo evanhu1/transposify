@@ -19,8 +19,7 @@ enum SelfTest {
         controller.testHooks = (engage: { _, _ in }, disengage: { })
         // Start from a known state: this exercises the engagement machine, not
         // whatever per-stem selection happens to be persisted.
-        controller.setAdvanced(false)
-        controller.setIsolate(.off)
+        controller.setPreset(.all)
 
         let steps: [Step] = [
             Step(label: "Spotify not running \u{2192} idle",
@@ -41,7 +40,7 @@ enum SelfTest {
                  expectEngaged: false, expectSemitones: 0),
             Step(label: "Isolate on at 0 \u{2192} engage",
                  delay: 0.05,
-                 action: { controller.setIsolate(.instrumental) },
+                 action: { controller.setPreset(.backing) },
                  expectEngaged: true, expectSemitones: 0),
             Step(label: "Pause \u{2192} disengage",
                  delay: 0.6,
@@ -53,7 +52,7 @@ enum SelfTest {
                  expectEngaged: true, expectSemitones: nil),
             Step(label: "Set +5 on A (isolate off), remembered",
                  delay: 0.05,
-                 action: { controller.setIsolate(.off); controller.setSemitones(5) },
+                 action: { controller.setPreset(.all); controller.setSemitones(5) },
                  expectEngaged: true, expectSemitones: 5),
             Step(label: "Switch to B \u{2192} default 0, disengage",
                  delay: 0.6,

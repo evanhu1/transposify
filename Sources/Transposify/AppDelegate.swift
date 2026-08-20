@@ -119,8 +119,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyDebugHooks() {
         let env = ProcessInfo.processInfo.environment
         if let v = env["TRANSPOSIFY_DEBUG_PITCH"], let n = Int(v) { controller.setSemitones(n) }
-        if let v = env["TRANSPOSIFY_DEBUG_ISOLATE"], let mode = IsolateTrack(rawValue: v) {
-            controller.setIsolate(mode)
+        if let v = env["TRANSPOSIFY_DEBUG_ISOLATE"], let p = IsolatePreset(rawValue: v) {
+            controller.setPreset(p)
         }
         // "12:vocals" — flip isolation mid-playback, to exercise the model
         // load happening under live audio.
@@ -129,10 +129,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for step in spec.split(separator: ",") {
                 let parts = step.split(separator: ":").map(String.init)
                 guard parts.count == 2, let delay = Double(parts[0]),
-                      let mode = IsolateTrack(rawValue: parts[1]) else { continue }
+                      let preset = IsolatePreset(rawValue: parts[1]) else { continue }
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    log.notice("debug: switching to \(mode.rawValue, privacy: .public)")
-                    self?.controller.setIsolate(mode)
+                    log.notice("debug: switching to \(preset.rawValue, privacy: .public)")
+                    self?.controller.setPreset(preset)
                 }
             }
         }
@@ -256,9 +256,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.setSemitones(2)
 
         let wantAdvanced = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_ADVANCED"]
-        if wantAdvanced == "0" { controller.setAdvanced(false) }
+        if wantAdvanced == "0" { controller.setPreset(.backing) }
         if wantAdvanced == "1" {
-            controller.setAdvanced(true)
+            controller.setPreset(.custom)
             // Wait for the model so the real stem count is known.
             let deadline = Date().addingTimeInterval(20)
             while controller.stemCount <= 4 && Date() < deadline {

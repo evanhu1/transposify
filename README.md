@@ -99,10 +99,10 @@ Click the menu-bar item to open the popup:
   popover just shows a placeholder.
 - **Transpose** — `−` / value / `+`, or the slider (±12 semitones). *Reset*
   (↺) appears when shifted.
-- **Isolate** — `Off` / `Vocals` / `Instrumental`.
-  Neural source separation (HTDemucs) either keeps the vocal and drops the
-  backing, or the reverse. Both add about two seconds of delay between Spotify
-  and what you hear. See [Vocal removal](#vocal-removal).
+- **Isolate** — `All` / `Vocals` / `Backing` / `Custom`. The first three are
+  names for common stem sets; `Custom` reveals the stems themselves so you can
+  pick any combination. Selecting none is silence. Neural separation adds about
+  0.6 s of delay — see [How the live separation works](#how-the-live-separation-works).
 - **Remember key for this song** — on by default; your setting auto-applies when
   that track plays again. New songs start at the original key.
 - **Launch at login** — register as a login item via `SMAppService`.
