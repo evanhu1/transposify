@@ -353,7 +353,7 @@ final class PopoverViewController: NSViewController {
             artistLabel.isHidden = false
             artistLabel.toolTip = message
         } else if controller.preparingModel {
-            trackLabel.stringValue = "Preparing vocal removal\u{2026}"
+            trackLabel.stringValue = "Preparing separation\u{2026}"
             trackLabel.textColor = .labelColor
             artistLabel.stringValue = "Loading the model, a few seconds"
             artistLabel.isHidden = false
@@ -402,6 +402,7 @@ final class PopoverViewController: NSViewController {
             box.state = controller.includes(stem) ? .on : .off
         }
         refreshModelRow()
+        updatePreferredSize()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = (spotify.current != nil)
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
@@ -486,6 +487,20 @@ final class PopoverViewController: NSViewController {
     /// Snapshot/testing only.
     func seedArtwork(_ image: NSImage, for trackID: String) {
         artwork.seed(image, for: trackID)
+    }
+
+    /// NSPopover sizes itself from the content controller's preferred size and
+    /// keeps whatever it measured first. The stack collapses hidden rows
+    /// correctly — simple mode genuinely fits in less height than Advanced —
+    /// but without republishing the size the popover keeps the taller frame and
+    /// leaves dead space below.
+    private func updatePreferredSize() {
+        view.layoutSubtreeIfNeeded()
+        let fitting = view.fittingSize
+        if abs(preferredContentSize.height - fitting.height) > 0.5
+            || abs(preferredContentSize.width - fitting.width) > 0.5 {
+            preferredContentSize = fitting
+        }
     }
 
     /// Album art for the current track, or the note placeholder. Requesting is

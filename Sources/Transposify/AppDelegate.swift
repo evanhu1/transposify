@@ -255,7 +255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.spotifyUpdate(running: true, playing: true, trackID: "snapshot")
         controller.setSemitones(2)
 
-        if ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_ADVANCED"] == "1" {
+        let wantAdvanced = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_ADVANCED"]
+        if wantAdvanced == "0" { controller.setAdvanced(false) }
+        if wantAdvanced == "1" {
             controller.setAdvanced(true)
             // Wait for the model so the real stem count is known.
             let deadline = Date().addingTimeInterval(20)
@@ -272,6 +274,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         content.appearance = NSAppearance(named: .darkAqua)
         content.layoutSubtreeIfNeeded()
         let size = content.fittingSize
+        let report = "popover fits \(Int(size.width))x\(Int(size.height)) pt, "
+            + "preferred \(Int(vc.preferredContentSize.width))x"
+            + "\(Int(vc.preferredContentSize.height))\n"
+        FileHandle.standardError.write(report.data(using: .utf8)!)
         content.frame = NSRect(origin: .zero, size: size)
 
         let host = NSView(frame: content.bounds)
