@@ -8,11 +8,6 @@ menu bar, and a popup when you click it. Settings are remembered per song.
 https://github.com/user-attachments/assets/f7157fe1-7879-4905-acac-966362948482
 
 <p align="center">
-  <sub>Turn the sound on &mdash; the point is what you hear, not what you see.<br>
-  No player? The same clip is in the repo: <a href="docs/demo.mp4">docs/demo.mp4</a></sub>
-</p>
-
-<p align="center">
   <img src="docs/popover.png" alt="The Transposify popover" width="300">
 </p>
 
