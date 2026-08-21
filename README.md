@@ -8,7 +8,7 @@ menu bar, and a popup when you click it. Settings are remembered per song.
 https://github.com/user-attachments/assets/f7157fe1-7879-4905-acac-966362948482
 
 <p align="center">
-  <img src="docs/popover.png" alt="The Transposify popover" width="300">
+  <img src="docs/popover-mix.png" alt="The Transposify popover" width="300">
 </p>
 
 ## Install
