@@ -178,13 +178,16 @@ typically a `coremltools` version mismatch or an ANE routing bug.
 ## Reproducing on a fresh machine
 
 ```bash
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python convert.py --fp16    # or default FP32
+./install-model.sh --force        # from the repo root
 ```
+
+That builds a hash-locked Python 3.11 environment from
+`tools/model-requirements.txt`, converts, compiles, and installs. To drive the
+converter directly instead, install that lock into a venv and run
+`python convert.py --segment 7.8 --fp16`.
 
 First run downloads ~300 MB of HTDemucs weights to `~/.cache/torch/hub/`.
 Conversion takes 2–5 minutes on an Apple Silicon Mac with 16 GB RAM.
 
-If `coremltools` complains about Python or `torch` versions, see the
-pinned bounds in `requirements.txt`.
+If `coremltools` complains about Python or `torch` versions, see the pinned
+versions in `../model-requirements.txt`.

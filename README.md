@@ -65,7 +65,7 @@ converter is vendored, the Python environment is version- and hash-locked, and
 the checkpoint is mirrored in this project's own `model-v1` release and verified
 before conversion, so it still works the day Meta's CDN goes away. Provenance
 and third-party notices:
-[`tools/htdemucs-coreml/`](tools/htdemucs-coreml/ATTRIBUTION.md).
+[`tools/htdemucs-coreml/`](tools/htdemucs-coreml/README.md).
 
 ## How it works
 
