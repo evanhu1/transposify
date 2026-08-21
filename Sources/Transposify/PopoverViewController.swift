@@ -154,14 +154,23 @@ final class PopoverViewController: NSViewController {
             artworkView.bottomAnchor.constraint(equalTo: artworkTile.bottomAnchor),
         ])
 
+        // Truncation. A long title or artist must end in an ellipsis rather
+        // than widen the popover, so both labels give up their width first:
+        // low compression resistance lets the text clip.
         trackLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         trackLabel.lineBreakMode = .byTruncatingTail
         trackLabel.maximumNumberOfLines = 1
         trackLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        trackLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         artistLabel.font = .systemFont(ofSize: 11)
         artistLabel.textColor = .secondaryLabelColor
         artistLabel.lineBreakMode = .byTruncatingTail
         artistLabel.maximumNumberOfLines = 1
+        artistLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Both labels also hug weakly. An NSTextField hugs at 750 by default,
+        // and the two share one width, so a hugging artist name would pull the
+        // row in and truncate a title that had room to spare.
+        artistLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let titleRow = NSStackView(views: [trackLabel])
         titleRow.orientation = .horizontal
@@ -170,6 +179,13 @@ final class PopoverViewController: NSViewController {
         nowRow.orientation = .vertical
         nowRow.alignment = .leading
         nowRow.spacing = 2
+        // An NSStackView refuses to be clipped at `required` priority, so
+        // these two would have pushed the row past the 296 pt width and
+        // stretched the whole popover. They yield instead; nowHeader keeps the
+        // required setting, which is what holds the width and forces them to.
+        for row in [titleRow, nowRow] {
+            row.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        }
 
         // Global on/off — disengages the whole pipeline so you can just listen.
         powerButton.image = NSImage(systemSymbolName: "power",
@@ -383,12 +399,14 @@ final class PopoverViewController: NSViewController {
             artistLabel.stringValue = "Enable in System Settings \u{25B8} Privacy"
             artistLabel.isHidden = false
             artistLabel.toolTip = message
+            trackLabel.toolTip = nil
         } else if controller.preparingModel {
             trackLabel.stringValue = "Preparing separation\u{2026}"
             trackLabel.textColor = .labelColor
             artistLabel.stringValue = "Loading the model, a few seconds"
             artistLabel.isHidden = false
             artistLabel.toolTip = nil
+            trackLabel.toolTip = nil
         } else if spotify.isRunning, let track = spotify.current, !track.name.isEmpty {
             trackLabel.stringValue = track.name
             trackLabel.textColor = .labelColor
@@ -397,12 +415,15 @@ final class PopoverViewController: NSViewController {
             artistLabel.stringValue = controller.priming
                 ? "Catching up\u{2026}" : track.artist
             artistLabel.isHidden = false
-            artistLabel.toolTip = nil
+            // A long name truncates, so the tooltip is where the rest of it is.
+            trackLabel.toolTip = track.name
+            artistLabel.toolTip = controller.priming ? nil : track.artist
         } else {
             trackLabel.stringValue = spotify.isRunning ? "Nothing playing" : "Spotify not running"
             trackLabel.textColor = .labelColor
             artistLabel.isHidden = true
             artistLabel.toolTip = nil
+            trackLabel.toolTip = nil
         }
 
         updateArtwork()
@@ -455,6 +476,9 @@ final class PopoverViewController: NSViewController {
     private func toggleRow(_ title: String, _ control: NSView, tooltip: String?) -> NSStackView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13)
+        // Same weight as the "Transpose" and "Mix" headings: this row names a
+        // setting, so it must not read louder than the sections above it.
+        label.textColor = .secondaryLabelColor
         label.toolTip = tooltip
         label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         let spacer = NSView()

@@ -80,9 +80,12 @@ class MixToggle: NSButton {
                     accentColor.withAlphaComponent(0.9),
                     .labelColor)
         }
-        return (NSColor(white: 0.5, alpha: hovering ? 0.16 : 0.09),
-                NSColor(white: 0.5, alpha: 0.22),
-                .secondaryLabelColor)
+        // Unselected, but still an offer: a secondary-grey pill reads as
+        // disabled chrome, so the off state keeps a visible fill, a defined
+        // edge, and text just under full strength.
+        return (NSColor(white: 0.5, alpha: hovering ? 0.24 : 0.15),
+                NSColor(white: 0.5, alpha: 0.34),
+                NSColor.labelColor.withAlphaComponent(0.78))
     }
 
     func paint(_ path: NSBezierPath) {

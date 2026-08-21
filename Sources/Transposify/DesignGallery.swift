@@ -47,6 +47,10 @@ enum DesignGallery {
              popover(controller, mask: 0b100110)),
             ("Off", "switched off; the mix controls go quiet",
              popover(controller, mask: full & ~1, enabled: false)),
+            ("Long names", "title and artist must truncate, not widen the popover",
+             popover(controller, mask: full & ~1,
+                     track: "Everything Is Everything (Remastered 2021 Deluxe Edition)",
+                     artist: "Nina Simone & The Philadelphia Orchestra")),
             ("Palette", "what AppKit will give you", ingredients()),
         ]
         writePNG(contactSheet(cards), to: path)
@@ -76,14 +80,16 @@ enum DesignGallery {
     /// building six would load the model six times, which is slow and would put
     /// six copies of a gigabyte-scale network in memory at once.
     private static func popover(_ controller: AudioController,
-                                mask: Int, enabled: Bool = true) -> NSView {
+                                mask: Int, enabled: Bool = true,
+                                track: String = "Human Nature",
+                                artist: String = "Michael Jackson") -> NSView {
         controller.setEnabled(true)
         for stem in Stem.allCases {
             controller.setStem(stem, included: mask & (1 << stem.rawValue) != 0)
         }
         controller.setEnabled(enabled)
         let spotify = SpotifyState()
-        spotify.injectSnapshotTrack(name: "Human Nature", artist: "Michael Jackson")
+        spotify.injectSnapshotTrack(name: track, artist: artist)
         let vc = PopoverViewController(controller: controller, spotify: spotify)
         vc.seedArtwork(fakeArtwork(), for: "snapshot")
         let view = vc.view
