@@ -23,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_GALLERY"] {
+            DesignGallery.run(to: path)
+            return
+        }
+
         if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_ICON_SNAPSHOT"] {
             Self.snapshotIcon(to: path)
             return
@@ -119,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyDebugHooks() {
         let env = ProcessInfo.processInfo.environment
         if let v = env["TRANSPOSIFY_DEBUG_PITCH"], let n = Int(v) { controller.setSemitones(n) }
-        if let v = env["TRANSPOSIFY_DEBUG_ISOLATE"], let p = IsolatePreset(rawValue: v) {
+        if let v = env["TRANSPOSIFY_DEBUG_ISOLATE"], let p = MixPreset(rawValue: v) {
             controller.setPreset(p)
         }
         // "12:vocals" — flip isolation mid-playback, to exercise the model
@@ -129,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for step in spec.split(separator: ",") {
                 let parts = step.split(separator: ":").map(String.init)
                 guard parts.count == 2, let delay = Double(parts[0]),
-                      let preset = IsolatePreset(rawValue: parts[1]) else { continue }
+                      let preset = MixPreset(rawValue: parts[1]) else { continue }
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     log.notice("debug: switching to \(preset.rawValue, privacy: .public)")
                     self?.controller.setPreset(preset)
@@ -255,13 +260,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.spotifyUpdate(running: true, playing: true, trackID: "snapshot")
         controller.setSemitones(2)
 
-        let wantAdvanced = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_ADVANCED"]
-        if wantAdvanced == "0" { controller.setPreset(.backing) }
-        if wantAdvanced == "1" {
-            controller.setPreset(.custom)
-            // Wait for the model so the real stem count is known.
+        // TRANSPOSIFY_SNAPSHOT_MIX picks the mix shown; anything but "all"
+        // needs the model, so optionally wait for it rather than capturing the
+        // "Preparing separation…" state.
+        let wanted = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_MIX"]
+        controller.setPreset(wanted.flatMap(MixPreset.init(rawValue:)) ?? .backing)
+        if ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT_WAIT"] == "1" {
             let deadline = Date().addingTimeInterval(20)
-            while controller.stemCount <= 4 && Date() < deadline {
+            while controller.preparingModel && Date() < deadline {
                 RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
             }
         }
@@ -279,6 +285,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + "\(Int(vc.preferredContentSize.height))\n"
         FileHandle.standardError.write(report.data(using: .utf8)!)
         content.frame = NSRect(origin: .zero, size: size)
+        content.layoutSubtreeIfNeeded()
+        if ProcessInfo.processInfo.environment["TRANSPOSIFY_GALLERY_DEBUG"] != nil {
+            DesignGallery.dumpTree(content)
+        }
 
         let host = NSView(frame: content.bounds)
         host.wantsLayer = true

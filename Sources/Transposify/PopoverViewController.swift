@@ -4,13 +4,15 @@ import AppKit
 private let transposeAccent = NSColor(calibratedRed: 0.23, green: 0.51, blue: 0.96, alpha: 1)
 
 /// Slider with a flat gray track and an accent knob.
-private final class TransposeSliderCell: NSSliderCell {
+final class TransposeSliderCell: NSSliderCell {
     override func drawBar(inside rect: NSRect, flipped: Bool) {
         let height: CGFloat = 4
         var bar = rect
         bar.origin.y = rect.midY - height / 2
         bar.size.height = height
-        NSColor(white: 0.5, alpha: 0.30).setFill()
+        // Alpha over a mid grey rather than a fixed colour, so the track keeps
+        // its contrast in both appearances.
+        NSColor(white: 0.5, alpha: 0.48).setFill()
         NSBezierPath(roundedRect: bar, xRadius: height / 2, yRadius: height / 2).fill()
     }
 
@@ -24,6 +26,56 @@ private final class TransposeSliderCell: NSSliderCell {
     }
 }
 
+/// A deliberately quiet checkbox for footer actions. AppKit's standard
+/// checkbox reverses to a bright fill in dark mode; this keeps the selected
+/// state dark with a soft white check instead.
+private final class FooterCheckbox: NSButton {
+    override var intrinsicContentSize: NSSize {
+        let titleSize = (title as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+        ])
+        return NSSize(width: 13 + 5 + ceil(titleSize.width),
+                      height: max(13, ceil(titleSize.height)))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let boxSize: CGFloat = 13
+        let boxRect = NSRect(x: 0, y: (bounds.height - boxSize) / 2,
+                             width: boxSize, height: boxSize)
+        let box = NSBezierPath(roundedRect: boxRect, xRadius: 3, yRadius: 3)
+
+        if state == .on {
+            NSColor(calibratedWhite: 0.18, alpha: 0.9).setFill()
+            box.fill()
+
+            let check = NSBezierPath()
+            check.lineWidth = 1.6
+            check.lineCapStyle = .round
+            check.lineJoinStyle = .round
+            check.move(to: NSPoint(x: 2.8, y: boxRect.midY))
+            check.line(to: NSPoint(x: 5.4, y: boxRect.maxY - 3.2))
+            check.line(to: NSPoint(x: 10.3, y: boxRect.minY + 3.1))
+            NSColor(white: 1, alpha: 0.82).setStroke()
+            check.stroke()
+        } else {
+            NSColor.tertiaryLabelColor.setStroke()
+            box.lineWidth = 1
+            box.stroke()
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let titleSize = (title as NSString).size(withAttributes: attributes)
+        let titleRect = NSRect(x: boxRect.maxX + 5,
+                               y: (bounds.height - titleSize.height) / 2,
+                               width: bounds.width - boxRect.maxX - 5,
+                               height: titleSize.height)
+        (title as NSString).draw(in: titleRect, withAttributes: attributes)
+    }
+}
+
 /// The popup shown from the menu bar: now-playing, a one-knob pitch control,
 /// and three toggles. Designed for singers, not musicians — direction and
 /// plain language over jargon.
@@ -32,6 +84,9 @@ final class PopoverViewController: NSViewController {
     private let spotify: SpotifyState
 
     private static let artworkSize: CGFloat = 40
+    private static let popoverWidth: CGFloat = 296
+    private static let contentInset: CGFloat = 16
+    private static let contentWidth = popoverWidth - contentInset * 2
     private let artworkView = NSImageView()
     private let artworkTile = NSView()
     private let artwork: ArtworkStore
@@ -41,16 +96,15 @@ final class PopoverViewController: NSViewController {
     private let slider = NSSlider()
     private let resetButton = NSButton()
     private let powerButton = NSButton()
-    private let presetPicker = NSSegmentedControl()
-    private var stemRows: NSStackView!
-    private var stemPickers: [NSSegmentedControl] = []
-    private var isolateSection: NSStackView!
+    private var presetChips: [MixPreset: MixChip] = [:]
+    private var stemGrid: NSStackView!
+    private var stemTiles: [StemTile] = []
     private var builtStemCount = 0
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
     private var modelRow: NSStackView!
     private let rememberSwitch = NSSwitch()
-    private let loginCheckbox = NSButton(
+    private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private var minusButton: NSButton!
     private var plusButton: NSButton!
@@ -69,7 +123,7 @@ final class PopoverViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
-        let width: CGFloat = 296
+        let width = Self.popoverWidth
 
         // Now playing ------------------------------------------------------
         // Album art, with the note glyph as the placeholder it falls back to
@@ -194,48 +248,49 @@ final class PopoverViewController: NSViewController {
         // Toggles ----------------------------------------------------------
         configure(rememberSwitch, #selector(rememberToggled))
         loginCheckbox.controlSize = .small
-        loginCheckbox.font = .systemFont(ofSize: 12)
-        loginCheckbox.contentTintColor = .secondaryLabelColor
         loginCheckbox.focusRingType = .none
         loginCheckbox.target = self
         loginCheckbox.action = #selector(loginToggled)
         loginCheckbox.setContentHuggingPriority(.required, for: .horizontal)
+        loginCheckbox.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // Isolate mirrors the Transpose section: a bare header, then the
-        // control at full width. Presets and stems are two views onto one
-        // piece of state, so they are the same kind of object — one
-        // single-select, one multi-select — stacked.
-        let isolateTitle = NSTextField(labelWithString: "Isolate")
-        isolateTitle.font = .systemFont(ofSize: 13, weight: .medium)
-        isolateTitle.textColor = .secondaryLabelColor
+        // Mix ----------------------------------------------------------
+        // One piece of state, shown twice. The chips name the three common
+        // masks; the tiles are the mask itself. Editing a tile simply stops
+        // matching a chip, so there is no mode to enter or leave and the
+        // section never changes height.
+        let mixTitle = NSTextField(labelWithString: "Mix")
+        mixTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        mixTitle.textColor = .secondaryLabelColor
 
-        presetPicker.segmentStyle = .rounded
-        presetPicker.segmentCount = IsolatePreset.allCases.count
-        presetPicker.focusRingType = .none
-        presetPicker.font = .systemFont(ofSize: 12)
-        presetPicker.target = self
-        presetPicker.action = #selector(presetChanged)
-        for (i, preset) in IsolatePreset.allCases.enumerated() {
-            presetPicker.setLabel(preset.title, forSegment: i)
+        var chips: [NSView] = []
+        for preset in MixPreset.allCases {
+            let chip = MixChip(title: preset.title, target: self,
+                               action: #selector(presetTapped(_:)))
+            chip.toolTip = preset.summary
+            presetChips[preset] = chip
+            chips.append(chip)
         }
-        presetPicker.setToolTip("Play the mix untouched.", forSegment: 0)
-        presetPicker.setToolTip("Keep the vocal, drop the backing.", forSegment: 1)
-        presetPicker.setToolTip("Remove the vocal, keep the backing.", forSegment: 2)
-        presetPicker.setToolTip("Choose stems individually.", forSegment: 3)
+        let chipSpacer = NSView()
+        chipSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let chipRow = NSStackView(views: chips + [chipSpacer])
+        chipRow.orientation = .horizontal
+        chipRow.alignment = .centerY
+        chipRow.spacing = 6
 
-        let stemStack = NSStackView(views: [])
-        stemStack.orientation = .vertical
-        stemStack.alignment = .leading
-        stemStack.spacing = 4
-        stemRows = stemStack
+        let grid = NSStackView(views: [])
+        grid.orientation = .vertical
+        grid.alignment = .leading
+        grid.spacing = 6
+        grid.distribution = .fill
+        stemGrid = grid
 
-        presetPicker.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let isolateStack = NSStackView(views: [isolateTitle, presetPicker, stemStack])
-        isolateStack.orientation = .vertical
-        isolateStack.alignment = .leading
-        isolateStack.spacing = 8
-        isolateSection = isolateStack
-        let karaokeRow: NSView = isolateStack
+        let mixStack = NSStackView(views: [mixTitle, chipRow, grid])
+        mixStack.orientation = .vertical
+        mixStack.alignment = .leading
+        mixStack.spacing = 8
+        mixStack.setCustomSpacing(10, after: chipRow)
+        let karaokeRow: NSView = mixStack
 
         // Notice row: model download prompt, or the Automation hint.
         modelLabel.font = .systemFont(ofSize: 11)
@@ -309,7 +364,7 @@ final class PopoverViewController: NSViewController {
         titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artwork.onChange = { [weak self] in self?.refresh() }
-        inactiveWhenOff = [header, sliderRow, karaokeRow]
+        inactiveWhenOff = [header, sliderRow, karaokeRow, rememberRow]
         view = container
     }
 
@@ -359,24 +414,20 @@ final class PopoverViewController: NSViewController {
         resetButton.isEnabled = (s != 0)
         resetButton.alphaValue = (s != 0) ? 1 : 0
 
-        rebuildStemPickersIfNeeded()
-        if let index = IsolatePreset.allCases.firstIndex(of: controller.preset) {
-            presetPicker.selectedSegment = index
+        rebuildStemTilesIfNeeded()
+        let installed = SeparationModel.isInstalled
+        for (preset, chip) in presetChips {
+            chip.lit = (controller.preset == preset)
+            chip.isEnabled = controller.enabled && (installed || preset == .all)
         }
-        for (i, preset) in IsolatePreset.allCases.enumerated() where preset != .all {
-            presetPicker.setEnabled(SeparationModel.isInstalled, forSegment: i)
-        }
-        stemRows.isHidden = !controller.showsStems
-        for picker in stemPickers {
-            for i in 0..<picker.segmentCount {
-                let stem = Stem(rawValue: picker.tag * 3 + i)
-                picker.setSelected(stem.map(controller.includes) ?? false, forSegment: i)
-            }
+        for tile in stemTiles {
+            tile.lit = controller.includes(tile.stem)
+            tile.isEnabled = controller.enabled && installed
         }
         refreshModelRow()
         updatePreferredSize()
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
-        rememberSwitch.isEnabled = (spotify.current != nil)
+        rememberSwitch.isEnabled = controller.enabled && (spotify.current != nil)
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
 
         let on = controller.enabled
@@ -385,7 +436,7 @@ final class PopoverViewController: NSViewController {
             ? "Transposing is on \u{2014} click to just listen"
             : "Transposing is off \u{2014} click to enable"
         for row in inactiveWhenOff { row.alphaValue = on ? 1 : 0.4 }
-        for control in [slider, minusButton, plusButton, resetButton, presetPicker] as [NSControl] {
+        for control in [slider, minusButton, plusButton, resetButton] as [NSControl] {
             control.isEnabled = on
         }
         // resetButton still hides itself at 0 even when enabled.
@@ -430,7 +481,9 @@ final class PopoverViewController: NSViewController {
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.focusRingType = .none
-        button.contentTintColor = .secondaryLabelColor
+        // Full-strength label colour: these two are the control you reach for
+        // most, so they read as primary rather than as secondary chrome.
+        button.contentTintColor = .labelColor
         button.target = self
         button.action = action
         button.setContentHuggingPriority(.defaultHigh, for: .horizontal)
@@ -462,16 +515,19 @@ final class PopoverViewController: NSViewController {
     }
 
     /// NSPopover sizes itself from the content controller's preferred size and
-    /// keeps whatever it measured first. The stack collapses hidden rows
-    /// correctly — simple mode genuinely fits in less height than Advanced —
-    /// but without republishing the size the popover keeps the taller frame and
-    /// leaves dead space below.
+    /// keeps whatever it measured first, so the size has to be republished
+    /// whenever the content's height changes — a four-stem model shows four
+    /// tiles where a six-stem model shows six.
+    ///
+    /// Only the height is taken. The width is a design constant, and a long
+    /// track title reports a `fittingSize` a few points wider than it, which
+    /// would nudge the popover sideways as songs change.
     private func updatePreferredSize() {
         view.layoutSubtreeIfNeeded()
-        let fitting = view.fittingSize
-        if abs(preferredContentSize.height - fitting.height) > 0.5
-            || abs(preferredContentSize.width - fitting.width) > 0.5 {
-            preferredContentSize = fitting
+        let height = view.fittingSize.height
+        if abs(preferredContentSize.height - height) > 0.5
+            || abs(preferredContentSize.width - Self.popoverWidth) > 0.5 {
+            preferredContentSize = NSSize(width: Self.popoverWidth, height: height)
         }
     }
 
@@ -560,53 +616,54 @@ final class PopoverViewController: NSViewController {
         }
     }
 
-    /// Stems are a multi-select segmented control — the same object as the
-    /// preset row, so the two read as one idea rather than two panels. Rebuilt
-    /// when the model's stem count changes, since segments can't be hidden
-    /// individually.
-    private func rebuildStemPickersIfNeeded() {
+    /// The tile grid, rebuilt when the model's stem count changes — a four-stem
+    /// model has no guitar or piano to offer.
+    ///
+    /// Three columns divide six stems evenly; four go in two columns rather
+    /// than leaving a lone tile on a second row.
+    private func rebuildStemTilesIfNeeded() {
         let count = controller.stemCount
         guard count != builtStemCount else { return }
         builtStemCount = count
-        stemPickers.forEach { $0.removeFromSuperview() }
-        stemPickers.removeAll()
-        stemRows.arrangedSubviews.forEach { stemRows.removeArrangedSubview($0); $0.removeFromSuperview() }
 
-        for (row, start) in stride(from: 0, to: count, by: 3).enumerated() {
-            let stems = (start..<min(start + 3, count)).compactMap(Stem.init(rawValue:))
-            let picker = NSSegmentedControl()
-            picker.segmentStyle = .rounded
-            picker.trackingMode = .selectAny          // independent toggles
-            picker.segmentCount = stems.count
-            picker.focusRingType = .none
-            picker.font = .systemFont(ofSize: 12)
-            picker.tag = row
-            picker.target = self
-            picker.action = #selector(stemsChanged(_:))
-            for (i, stem) in stems.enumerated() {
-                picker.setLabel(stem.title, forSegment: i)
-                picker.setWidth(84, forSegment: i)
+        stemTiles.removeAll()
+        for row in stemGrid.arrangedSubviews {
+            stemGrid.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+
+        let stems = Stem.displayOrder.filter { $0.rawValue < count }
+        let columns = stems.count % 3 == 0 ? 3 : 2
+        let spacing: CGFloat = 6
+        for start in stride(from: 0, to: stems.count, by: columns) {
+            let slice = stems[start..<min(start + columns, stems.count)]
+            let tiles = slice.map {
+                StemTile(stem: $0, target: self, action: #selector(stemTapped(_:)))
             }
-            stemPickers.append(picker)
-            stemRows.addArrangedSubview(picker)
+            stemTiles.append(contentsOf: tiles)
+            let row = NSStackView(views: tiles)
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.distribution = .fillEqually
+            row.spacing = spacing
+            // Rows have no intrinsic width of their own, so without this the
+            // equal-width tiles collapse on top of each other.
+            row.widthAnchor.constraint(
+                equalToConstant: Self.contentWidth).isActive = true
+            stemGrid.addArrangedSubview(row)
         }
     }
 
-    @objc private func stemsChanged(_ sender: NSSegmentedControl) {
-        for i in 0..<sender.segmentCount {
-            guard let stem = Stem(rawValue: sender.tag * 3 + i) else { continue }
-            let on = sender.isSelected(forSegment: i)
-            if on != controller.includes(stem) {
-                controller.setStem(stem, included: on)
-            }
-        }
+    @objc private func stemTapped(_ sender: StemTile) {
+        controller.setStem(sender.stem, included: !controller.includes(sender.stem))
     }
 
-    @objc private func presetChanged() {
-        let index = presetPicker.selectedSegment
-        guard index >= 0, index < IsolatePreset.allCases.count else { return }
-        controller.setPreset(IsolatePreset.allCases[index])
+    @objc private func presetTapped(_ sender: MixChip) {
+        guard let preset = presetChips.first(where: { $0.value === sender })?.key
+        else { return }
+        controller.setPreset(preset)
     }
+
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
     @objc private func loginToggled() {
         LoginItem.set(loginCheckbox.state == .on)

@@ -25,18 +25,26 @@ enum Stem: Int, CaseIterable {
 }
 
 /// Named stem sets. These are *shortcuts*, not a separate mode: the truth is
-/// always the stem mask, and a preset is simply the name of a common one.
-/// `custom` is the odd one out — it selects nothing, it only reveals the
-/// per-stem controls.
-enum IsolatePreset: String, CaseIterable {
-    case all, vocals, backing, custom
+/// always the stem mask, and a preset is simply the name of a common one. Any
+/// other mask is unnamed, which is why `preset` is optional rather than having
+/// a "custom" case — a case that meant "none of the above" would be a second
+/// place for the truth to live.
+enum MixPreset: String, CaseIterable {
+    case all, vocals, backing
 
     var title: String {
         switch self {
         case .all: return "All"
         case .vocals: return "Vocals"
         case .backing: return "Backing"
-        case .custom: return "Custom"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .all: return "Play the mix untouched."
+        case .vocals: return "Keep the vocal, drop the backing."
+        case .backing: return "Remove the vocal, keep the backing."
         }
     }
 }
@@ -59,10 +67,6 @@ final class AudioController {
     /// untouched — lets you just listen without quitting. Persisted across launches.
     private(set) var enabled: Bool
 
-    /// Which preset is highlighted. Derived state for the UI — the stem mask
-    /// below is what actually drives the audio.
-    private(set) var preset: IsolatePreset
-
     /// The single source of truth: which stems reach the output.
     private(set) var stemMask: Int
     /// How many stems existed when `stemMask` was last saved. A model with more
@@ -70,9 +74,33 @@ final class AudioController {
     /// user never unchecked something that did not exist.
     private var knownStemCount: Int
 
-    /// How many stems the installed model actually has. Four until a six-stem
-    /// model is loaded; the extra checkboxes stay hidden until then.
-    var stemCount: Int { modelLoader.stemCount ?? 4 }
+    /// How many stems the installed model actually has. Until it loads, the
+    /// count from the last session — so the tiles do not have to wait for a
+    /// model the user may not even need this time.
+    var stemCount: Int { modelLoader.stemCount ?? knownStemCount }
+
+    /// The preset the current mask happens to match, or nil when it matches
+    /// none. Always derived, never stored: a stored preset can fall out of step
+    /// with the mask, and then the interface shows a selection the audio does
+    /// not have.
+    var preset: MixPreset? {
+        let available = (1 << stemCount) - 1
+        let mask = stemMask & available
+        if mask == available { return .all }
+        if mask == 1 << Stem.vocalsIndex { return .vocals }
+        if mask == available & ~(1 << Stem.vocalsIndex) { return .backing }
+        return nil
+    }
+
+    /// The mask a preset stands for, at the current stem count.
+    func mask(for preset: MixPreset) -> Int {
+        let available = (1 << stemCount) - 1
+        switch preset {
+        case .all: return available
+        case .vocals: return 1 << Stem.vocalsIndex
+        case .backing: return available & ~(1 << Stem.vocalsIndex)
+        }
+    }
 
     /// True while the neural pipeline is filling its lookahead buffer and the
     /// output hasn't started yet.
@@ -83,8 +111,8 @@ final class AudioController {
     private static let enabledKey = "globalEnabled"
     private static let karaokeKey = "globalKaraoke"          // legacy Bool
     private static let reductionKey = "vocalReduction"        // legacy string
-    private static let isolateKey = "isolateTrack"
-    private static let advancedKey = "advancedStems"
+    private static let isolateKey = "isolateTrack"       // legacy, read once
+    private static let advancedKey = "advancedStems"     // legacy Bool, unused
     private static let stemMaskKey = "stemMask"
     private static let stemMaskCountKey = "stemMaskCount"
 
@@ -93,33 +121,22 @@ final class AudioController {
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
-        // Migrate: before presets and stems were unified, the audible state was
-        // either `isolateTrack` (simple) or `stemMask` (advanced), depending on
-        // an `advanced` flag. Collapse that into a single mask.
-        let wasAdvanced = defaults.bool(forKey: Self.advancedKey)
-        let storedMask = defaults.object(forKey: Self.stemMaskKey) as? Int
-        let allFour = StemSelection.mask([0, 1, 2, 3])
-        if wasAdvanced, let storedMask {
-            stemMask = storedMask
-            preset = .custom
+        knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
+        let available = (1 << knownStemCount) - 1
+        // The mask is the whole of the saved state. `isolateTrack` is the older
+        // named-mode setting, read once for anyone upgrading and never written.
+        if let stored = defaults.object(forKey: Self.stemMaskKey) as? Int {
+            stemMask = stored
         } else {
             switch defaults.string(forKey: Self.isolateKey) {
-            case "vocals":
-                stemMask = 1 << Stem.vocalsIndex
-                preset = .vocals
-            case "instrumental":
-                stemMask = allFour & ~(1 << Stem.vocalsIndex)
-                preset = .backing
-            default:
-                stemMask = allFour
-                preset = .all
+            case "vocals": stemMask = 1 << Stem.vocalsIndex
+            case "instrumental": stemMask = available & ~(1 << Stem.vocalsIndex)
+            default: stemMask = available
             }
         }
-        knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
-        if preset != .all && !SeparationModel.isInstalled {
-            stemMask = allFour
-            preset = .all
-        }
+        // Nothing can be dropped without the model, so start on the full mix
+        // rather than showing a selection that silently is not happening.
+        if !SeparationModel.isInstalled { stemMask = available }
         // Loading is slow, so it happens off the main thread; engagement waits
         // for readiness rather than blocking on it.
         modelLoader.onChange = { [weak self] in
@@ -149,7 +166,7 @@ final class AudioController {
 
     /// Downloads the separation model, then switches to the mode the user was
     /// reaching for — they asked for the mode, not for a file.
-    func downloadModel(then wanted: IsolatePreset = .backing) {
+    func downloadModel(then wanted: MixPreset = .backing) {
         guard !SeparationModel.isInstalled else { return }
         wantedModeWhenInstalled = wanted
         lastError = nil
@@ -166,12 +183,9 @@ final class AudioController {
     /// True while the model is still loading and "Best" is selected — the UI
     /// shows this rather than looking broken during a cold load.
     /// The model is only needed when some stem is actually being dropped.
-    var needsModel: Bool { !currentSelection.isPassthrough || preset == .custom }
+    var needsModel: Bool { !currentSelection.isPassthrough }
 
     var preparingModel: Bool { needsModel && modelLoader.isLoading }
-
-    /// Per-stem controls are showing.
-    var showsStems: Bool { preset == .custom }
 
     private var currentTrackID: String?
     private var hasTrack = false
@@ -186,7 +200,7 @@ final class AudioController {
     private var separationWatchdog: DispatchSourceTimer?
     private let modelLoader = SeparationModelLoader()
     let modelInstaller = SeparationModelInstaller()
-    private var wantedModeWhenInstalled: IsolatePreset?
+    private var wantedModeWhenInstalled: MixPreset?
     private let store = SongSettingsStore()
 
     private var disengageWork: DispatchWorkItem?
@@ -264,22 +278,14 @@ final class AudioController {
     func nudge(_ delta: Int) { setSemitones(semitones + delta) }
     func resetPitch() { setSemitones(0) }
 
-    /// Choose a preset. `custom` only reveals the per-stem controls; it never
-    /// changes what you hear, so opening it is always safe.
-    func setPreset(_ new: IsolatePreset) {
+    /// Choose a preset — a shortcut for setting the mask to a common value.
+    func setPreset(_ new: MixPreset) {
         if new != .all && !SeparationModel.isInstalled {
             lastError = SeparationModel.installHint
             onChange?()
             return
         }
-        preset = new
-        let available = (1 << stemCount) - 1
-        switch new {
-        case .all: stemMask = available
-        case .vocals: stemMask = 1 << Stem.vocalsIndex
-        case .backing: stemMask = available & ~(1 << Stem.vocalsIndex)
-        case .custom: break          // reveal only
-        }
+        stemMask = mask(for: new)
         persistSelection()
         if needsModel { lastError = nil; modelLoader.prepare() } else { releaseModelIfIdle() }
         applySelection()
@@ -292,9 +298,6 @@ final class AudioController {
         let updated = included ? (stemMask | bit) : (stemMask & ~bit)
         guard updated != stemMask else { return }
         stemMask = updated
-        // Editing stems is what "custom" means; stay there rather than snapping
-        // the highlight to whichever preset the mask happens to match.
-        preset = .custom
         persistSelection()
         if needsModel { modelLoader.prepare() }
         applySelection()
@@ -308,16 +311,10 @@ final class AudioController {
         let defaults = UserDefaults.standard
         defaults.set(stemMask, forKey: Self.stemMaskKey)
         defaults.set(stemCount, forKey: Self.stemMaskCountKey)
-        defaults.set(preset.rawValue, forKey: Self.isolateKey)
-        defaults.set(preset == .custom, forKey: Self.advancedKey)
     }
 
     /// What the worker should emit.
     private var currentSelection: StemSelection {
-        // "All" is authoritative. A mask saved when the model had four stems
-        // reads as "everything except guitar and piano" against a six-stem
-        // model, which would engage the pipeline to reproduce the full mix.
-        if preset == .all { return .passthrough }
         let available = (1 << stemCount) - 1
         let mask = stemMask & available
         // Everything selected is the untouched mix, which passthrough gives
@@ -429,7 +426,7 @@ final class AudioController {
             if let engine, !engine.hold {
                 engine.hold = true
                 log.notice("""
-                    held (paused with \(self.preset.rawValue, privacy: .public) \
+                    held (paused with \(self.preset?.rawValue ?? "custom", privacy: .public) \
                     pipeline intact)\(self.flightDescription(), privacy: .public)
                     """)
             }
@@ -503,7 +500,7 @@ final class AudioController {
             log.notice("""
                 engaged: \(capture.sampleRate, privacy: .public) Hz, \
                 pitch \(self.semitones, privacy: .public) st, \
-                stems \(self.stemMask, privacy: .public) (\(self.preset.rawValue, privacy: .public))
+                stems \(self.stemMask, privacy: .public) (\(self.preset?.rawValue ?? "custom", privacy: .public))
                 """)
         } catch {
             disengage()
