@@ -5,16 +5,11 @@ range** — shift the key up or down by semitones in real time, pitch without
 tempo change. It stays out of the way: a small `𝄞 +2` / `𝄞 −3` / `𝄞 0` in the
 menu bar, and a popup when you click it. Settings are remembered per song.
 
-<p align="center">
-  <a href="docs/demo.mp4">
-    <img src="docs/demo-poster.png" width="760"
-         alt="Transposify running over Spotify: Hotel California transposed up four semitones, with piano and other muted">
-  </a>
-</p>
+https://github.com/user-attachments/assets/f7157fe1-7879-4905-acac-966362948482
 
 <p align="center">
-  <a href="docs/demo.mp4"><b>&#9654;&nbsp; Watch the 26-second demo</b></a><br>
-  <sub>Turn the sound on &mdash; the point is what you hear, not what you see.</sub>
+  <sub>Turn the sound on &mdash; the point is what you hear, not what you see.<br>
+  No player? The same clip is in the repo: <a href="docs/demo.mp4">docs/demo.mp4</a></sub>
 </p>
 
 <p align="center">
