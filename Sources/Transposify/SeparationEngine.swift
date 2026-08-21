@@ -184,6 +184,26 @@ final class SeparationEngine {
     private var emitL: [Float]
     private var emitR: [Float]
 
+    /// How close the output ring came to running dry, and how long the
+    /// slowest hop took. Together these say whether a mode switch has any
+    /// margin left: a switch from passthrough to separated costs one inference
+    /// of ring occupancy, so `minOutputFrames` must stay comfortably above the
+    /// audio that inference represents, or the render side underruns.
+    private let minOutputBox = Box(Int.max)
+    private let maxStepBox = Box(0.0)
+
+    /// Smallest output-ring occupancy seen, in capture-rate frames.
+    var minOutputFrames: Int { minOutputBox.get() }
+    /// Longest single hop, in seconds — inference plus resampling and copying.
+    var maxStepSeconds: Double { maxStepBox.get() }
+
+    /// Called once playback has settled, so the figures describe steady state
+    /// rather than the priming ramp.
+    func resetMargins() {
+        minOutputBox.set(Int.max)
+        maxStepBox.set(0)
+    }
+
     /// Latched when a prediction throws; the controller surfaces it and stops.
     private let failureBox = FailureBox()
 
@@ -334,7 +354,21 @@ final class SeparationEngine {
             """)
         while shouldRun.get() {
             drainInput()
-            if !stepIfReady() { usleep(10_000) }   // 10 ms; one hop is 1 s
+            let began = Date()
+            let did = stepIfReady()
+            if did {
+                let elapsed = -began.timeIntervalSinceNow
+                if elapsed > maxStepBox.get() { maxStepBox.set(elapsed) }
+            } else {
+                usleep(10_000)                      // 10 ms; one hop is ~0.3 s
+            }
+            // Sampled after the step, which is where the ring is shallowest.
+            // Only once playing: while held nothing drains, and while priming
+            // the ring is legitimately empty.
+            if gate.get(), primed {
+                let occupancy = outputRing.availableToRead / channels
+                if occupancy < minOutputBox.get() { minOutputBox.set(occupancy) }
+            }
         }
         exited.signal()
         log.notice("separation worker stopped")

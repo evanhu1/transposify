@@ -204,6 +204,8 @@ final class AudioController {
     private let store = SongSettingsStore()
 
     private var disengageWork: DispatchWorkItem?
+    /// Running with nothing to do, waiting for a track boundary to stand down.
+    private var coasting = false
     private var reconfiguring = false
 
     /// A track change reaches the ears ~0.6 s after Spotify reports it (the
@@ -214,12 +216,23 @@ final class AudioController {
     private var lastUnderrunLog = 0
 
     /// Buffered audio to build before letting playback start, in ring floats.
-    /// Sized to comfortably exceed one inference, since switching modes shifts
-    /// production later by exactly that much.
+    ///
+    /// This is the floor under the output ring, and it is what a mode switch
+    /// spends. Switching a full mix to a separated one turns a hop that cost
+    /// nothing into one that costs an inference, so production lands one
+    /// inference later and the ring drains by exactly that much. If the floor
+    /// is thinner than the worst hop, that switch is audible.
+    ///
+    /// Two terms, because two different things go wrong. `inference * 1.5`
+    /// covers slow hardware, where inference dominates. The `+ 0.12` covers
+    /// fast hardware, where inference is small but ordinary scheduling jitter
+    /// is not — a 105 ms inference with a 1.5 multiplier leaves only ~50 ms of
+    /// absolute headroom, which one late thread wake-up eats. The floor costs
+    /// latency, so it is the smallest number that survives both.
     private var cushionFloats: Int {
         let inference = SeparationModelLoader.measuredInference
             ?? SeparationEngine.assumedInferenceSeconds
-        let seconds = max(0.15, inference * 1.5)
+        let seconds = max(0.15, max(inference * 1.5, inference + 0.12))
         let rate = capture?.sampleRate ?? 48_000
         let channels = capture?.channelCount ?? 2
         return Int(seconds * rate) * channels
@@ -235,12 +248,22 @@ final class AudioController {
         spotifyRunning = running
         spotifyPlaying = playing
         separation?.setInputGate(open: running && playing)
-        if trackID != currentTrackID {
+        let trackChanged = trackID != currentTrackID
+        if trackChanged {
             currentTrackID = trackID
             hasTrack = trackID != nil
             loadSettingForCurrentTrack()
         }
-        updateEngagement()
+        // A coasting pipeline gives its latency back here, and only here: at a
+        // track change the audio is already discontinuous, so the ~0.6 s that
+        // teardown costs lands on a boundary instead of mid-phrase. If the new
+        // track has a saved transpose, the pipeline is useful again and stays.
+        if trackChanged && engaged && !pipelineUseful {
+            log.notice("standing down at track boundary")
+            disengage()
+        } else {
+            updateEngagement()
+        }
         onChange?()
     }
 
@@ -401,17 +424,40 @@ final class AudioController {
 
     private var shouldEngage: Bool { pipelineUseful && spotifyPlaying }
 
-    /// Pause with the separation pipeline up: hold, don't tear down. Teardown
-    /// would discard ~2 s of in-flight audio; holding freezes it, so resume
-    /// continues from the exact sample and never re-primes.
+    /// Paused with the pipeline up: hold, don't tear down. Teardown would
+    /// discard the ~0.6 s in flight — audio the listener has not heard yet,
+    /// and which Spotify will not replay, because it resumes from its own
+    /// playhead. Holding freezes it, so resume continues from the exact sample.
+    ///
+    /// This deliberately does not ask whether the pipeline is still *useful*.
+    /// A paused pipeline costs nothing to keep — no GPU, no audible mute — and
+    /// standing down here would be the one stand-down that loses audio.
     private var shouldHold: Bool {
-        engaged && separation != nil && pipelineUseful && !spotifyPlaying
+        engaged && separation != nil && enabled && spotifyRunning && !spotifyPlaying
+    }
+
+    /// Nothing needs the pipeline — a full mix at zero semitones — but audio is
+    /// playing and the pipeline is already up.
+    ///
+    /// Standing down here is not free. About 0.6 s is in flight; dropping it
+    /// hands the listener Spotify's live position instead, which is a jump
+    /// forward mid-phrase, and coming back costs the same jump in reverse.
+    /// That is exactly what made switching between mixes feel disconnected.
+    ///
+    /// So coast: keep running, which in a full mix means passthrough — the
+    /// same window and hop machinery with no inference at all — and stand down
+    /// at the next track change, the one moment during playback where the
+    /// audio is already discontinuous.
+    private var canCoast: Bool {
+        engaged && enabled && spotifyRunning && spotifyPlaying && hasTrack
+            && separation?.failure == nil
     }
 
     private func updateEngagement() {
         if shouldEngage {
             disengageWork?.cancel()
             disengageWork = nil
+            coasting = false
             if engaged {
                 if let engine, engine.hold, !priming {
                     engine.hold = false
@@ -423,11 +469,22 @@ final class AudioController {
         } else if shouldHold {
             disengageWork?.cancel()
             disengageWork = nil
+            coasting = false
             if let engine, !engine.hold {
                 engine.hold = true
                 log.notice("""
                     held (paused with \(self.preset?.rawValue ?? "custom", privacy: .public) \
                     pipeline intact)\(self.flightDescription(), privacy: .public)
+                    """)
+            }
+        } else if canCoast {
+            disengageWork?.cancel()
+            disengageWork = nil
+            if !coasting {
+                coasting = true
+                log.notice("""
+                    coasting: nothing to separate, staying up so switching back \
+                    costs no jump\(self.flightDescription(), privacy: .public)
                     """)
             }
         } else {
@@ -524,6 +581,16 @@ final class AudioController {
                       Double(staged - consumed) / rate, staged, consumed)
     }
 
+    /// How much room the output ring has had, and what the slowest hop cost.
+    /// A mode switch spends one hop's worth of the first; if the two numbers
+    /// converge, switching is about to be audible.
+    private func marginDescription(_ separation: SeparationEngine) -> String {
+        let rate = capture?.sampleRate ?? 48_000
+        let frames = separation.minOutputFrames
+        let cushion = frames == Int.max ? -1 : Int(Double(frames) / rate * 1000)
+        return "min cushion \(cushion) ms, worst hop \(Int(separation.maxStepSeconds * 1000)) ms"
+    }
+
     /// Watches the separation worker: clears `priming` once audio is flowing and
     /// surfaces a prediction failure instead of leaving the user in silence.
     private func startSeparationWatchdog() {
@@ -546,6 +613,9 @@ final class AudioController {
                 // unavoidable when the pipeline builds its buffer from empty.
                 self.engine?.resetUnderruns()
                 self.lastUnderrunLog = 0
+                // Margins measured during priming describe the ramp, not the
+                // steady state that mode switching has to survive.
+                separation.resetMargins()
                 self.onChange?()
             }
             // Trace where glitches land relative to loading and switching.
@@ -555,7 +625,8 @@ final class AudioController {
                     log.notice("""
                         underruns \(n, privacy: .public) (+\(n - self.lastUnderrunLog, privacy: .public)) \
                         model \(self.modelLoader.model != nil, privacy: .public) \
-                        worker \(separation.hasModel, privacy: .public)
+                        worker \(separation.hasModel, privacy: .public) \
+                        \(self.marginDescription(separation), privacy: .public)
                         """)
                     self.lastUnderrunLog = n
                 }
@@ -580,17 +651,28 @@ final class AudioController {
             return
         }
         separationWatchdog?.cancel(); separationWatchdog = nil
+        let captureRateAtStop = capture?.sampleRate ?? 48_000
         let underrunsAtStop = engine?.underruns ?? 0
+        let margin = separation.map {
+            (frames: $0.minOutputFrames, step: $0.maxStepSeconds)
+        }
         engine?.stop(); engine = nil
         // Stop the worker before the capture ring it reads from goes away.
         separation?.stop(); separation = nil
         capture?.stop(); capture = nil
         priming = false
+        coasting = false
         modelLoader.releaseAfterGrace()   // keep it briefly in case they return
         pendingSemitones = nil   // next engage seeds engine.semitones directly
         engaged = false
         if wasEngaged {
-            log.notice("disengaged (passthrough), underruns \(underrunsAtStop, privacy: .public)")
+            let rate = captureRateAtStop
+            let cushionMs = margin.map { $0.frames == Int.max ? -1 : Int(Double($0.frames) / rate * 1000) } ?? -1
+            let stepMs = margin.map { Int($0.step * 1000) } ?? 0
+            log.notice("""
+                disengaged (passthrough), underruns \(underrunsAtStop, privacy: .public), \
+                min cushion \(cushionMs, privacy: .public) ms, worst hop \(stepMs, privacy: .public) ms
+                """)
         }
         onChange?()
     }
