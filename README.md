@@ -6,7 +6,19 @@ tempo change. It stays out of the way: a small `𝄞 +2` / `𝄞 −3` / `𝄞 0
 menu bar, and a popup when you click it. Settings are remembered per song.
 
 <p align="center">
-  <img src="docs/popover.png" alt="Transposify popover" width="320">
+  <a href="docs/demo.mp4">
+    <img src="docs/demo-poster.png" width="760"
+         alt="Transposify running over Spotify: Hotel California transposed up four semitones, with piano and other muted">
+  </a>
+</p>
+
+<p align="center">
+  <a href="docs/demo.mp4"><b>&#9654;&nbsp; Watch the 26-second demo</b></a><br>
+  <sub>Turn the sound on &mdash; the point is what you hear, not what you see.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/popover.png" alt="The Transposify popover" width="300">
 </p>
 
 ## Install
@@ -99,10 +111,13 @@ Click the menu-bar item to open the popup:
   popover just shows a placeholder.
 - **Transpose** — `−` / value / `+`, or the slider (±12 semitones). *Reset*
   (↺) appears when shifted.
-- **Isolate** — `All` / `Vocals` / `Backing` / `Custom`. The first three are
-  names for common stem sets; `Custom` reveals the stems themselves so you can
-  pick any combination. Selecting none is silence. Neural separation adds about
-  0.6 s of delay — see [How the live separation works](#how-the-live-separation-works).
+- **Mix** — which parts of the track you hear. The six stem tiles are the whole
+  of it: a lit tile plays, a dark one does not. `All` / `Vocals` / `Backing`
+  above them are names for the three common combinations, and one of them lights
+  up whenever the tiles happen to match. Edit a tile and none does — that is all
+  "custom" means here, so there is no mode to enter or leave. Turning every tile
+  off is silence. Neural separation adds about 0.7 s of delay — see
+  [How the live separation works](#how-the-live-separation-works).
 - **Remember key for this song** — on by default; your setting auto-applies when
   that track plays again. New songs start at the original key.
 - **Launch at login** — register as a login item via `SMAppService`.
