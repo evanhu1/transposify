@@ -167,22 +167,6 @@ comes out changed and the existing crossfade joins it to the previous one. No
 gap, no repeat, no drift. Preparation, including a cold model load, happens
 underneath audio that keeps playing.
 
-### What the knobs actually buy
-
-The quality figures above compare streaming against _whole-file offline Demucs_,
-so they measure what streaming gives up, and say nothing about separation
-quality itself. Offline Demucs scores about **9 dB** against true isolated
-stems. That is the model's own error, and it is what you hear as faint bleed.
-Streaming sits ~22 dB below the offline result, some 13 dB below that error, so
-it adds almost nothing audible.
-
-So hop and lookahead buy latency and power while leaving quality alone. Sweeping
-them from 2.1 s of delay to 0.5 s moved the figure from 23.2 dB to 22.5 dB, and
-it wobbled without trending. The original 2 s delay bought nothing.
-
-Better separation needs a better model. The next one up (Mel-Band RoFormer, ~2
-dB better) is roughly 12x too slow to stream.
-
 ## Diagnostics & tests
 
 ```sh
