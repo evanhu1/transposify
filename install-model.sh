@@ -116,9 +116,12 @@ if [ ! -f "$CACHE/$WEIGHTS_NAME" ]; then
     mv "$CACHE/$WEIGHTS_NAME.tmp" "$CACHE/$WEIGHTS_NAME"
 fi
 
-echo "==> converting (7.8 s segments, FP16) — this is the slow part"
-( cd tools/htdemucs-coreml && "$OLDPWD/$WORK/venv/bin/python" convert.py \
-    --segment 7.8 --fp16 )
+# 3 s windows, not the 7.8 s the model was trained on: a prediction costs a
+# quarter as much, which is what lets the hop shrink, and on a 60 s test the
+# output was within 1 dB of the 7.8 s window against an offline reference.
+echo "==> converting (3 s segments, FP16) — this is the slow part"
+( cd tools/htdemucs-coreml && HTDEMUCS_MODEL=htdemucs_6s \
+    "$OLDPWD/$WORK/venv/bin/python" convert.py --segment 3.0 --fp16 )
 
 PKG="tools/htdemucs-coreml/HTDemucs_CoreML_FP16.mlpackage"
 [ -d "$PKG" ] || { echo "error: conversion produced no .mlpackage"; exit 1; }

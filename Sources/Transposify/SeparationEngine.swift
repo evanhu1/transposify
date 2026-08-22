@@ -47,7 +47,7 @@ private final class Counter: @unchecked Sendable {
 }
 
 /// Neural vocal removal. Drains the capture ring, runs HTDemucs over a sliding
-/// 7.8 s window through Core ML, and republishes an instrumental-only stream in
+/// 3 s window through Core ML, and republishes an instrumental-only stream in
 /// the *same* format it consumed — interleaved floats at the capture rate — so
 /// `PitchEngine` reads it without knowing separation happened at all.
 ///
@@ -88,7 +88,33 @@ final class SeparationEngine {
     // MARK: - Model geometry (must match the converted .mlmodelc)
 
     static let modelRate: Double = 44_100
-    static let windowFrames = 343_980          // 7.8 s at 44.1 kHz
+    /// The window the converter baked in, when nothing better is known.
+    /// `convert.py --segment` sets it; the app reads the real value from the
+    /// model's input shape and remembers it, so a model with a different
+    /// window drops in without a code change.
+    static let defaultWindowFrames = 343_980   // 7.8 s at 44.1 kHz
+    private static let windowKey = "modelWindowFrames"
+
+    /// A model's window is not readable without loading it, so the last
+    /// loaded model's window is kept for an engine built before the next
+    /// load finishes.
+    static var storedWindowFrames: Int? {
+        let v = UserDefaults.standard.integer(forKey: windowKey)
+        return v > 0 ? v : nil
+    }
+
+    /// Frames per window from a loaded model's input description.
+    static func windowFrames(of model: MLModel) -> Int? {
+        let shape = model.modelDescription.inputDescriptionsByName[inputFeature]?
+            .multiArrayConstraint?.shape.map(\.intValue)
+        guard let last = shape?.last, last > 0 else { return nil }
+        UserDefaults.standard.set(last, forKey: windowKey)
+        return last
+    }
+
+    /// This engine's window, fixed at init: the input array and every offset
+    /// into it are sized from this.
+    let windowFrames: Int
     static let inputFeature = "audio"
     static let outputFeature = "sources"
     /// Lookahead costs delay but no GPU, and its quality curve is shallow at
@@ -108,6 +134,10 @@ final class SeparationEngine {
     /// machine doesn't thrash on tiny blocks and a very slow one doesn't drift
     /// into absurd latency.
     static let dutyTarget = 0.40
+    /// 0.15, not lower: with the 3 s model a 0.12 s hop ran clean at the
+    /// median (60 ms predictions) but bursts of 100–200 ms predictions — the
+    /// GPU being borrowed by something else — pushed duty past 85% and the
+    /// worker behind. 0.15–0.16 absorbed the same bursts with no underrun.
     static let minHopSeconds = 0.15
     static let maxHopSeconds = 2.0
 
@@ -149,6 +179,10 @@ final class SeparationEngine {
     /// session — a model loading under playback, a thermal dip — does not
     /// charge every later session for it. A machine that really is that slow
     /// re-establishes the number within seconds.
+    static func forgetWorstStep() {
+        UserDefaults.standard.removeObject(forKey: worstStepKey)
+    }
+
     static func decayWorstStep() {
         guard SeparationModelLoader.persistMeasurements else { return }
         let v = UserDefaults.standard.double(forKey: worstStepKey)
@@ -174,7 +208,7 @@ final class SeparationEngine {
     let hopFrames: Int
     let lookaheadFrames: Int
     let crossfadeFrames: Int
-    var pastFrames: Int { Self.windowFrames - hopFrames - lookaheadFrames }
+    var pastFrames: Int { windowFrames - hopFrames - lookaheadFrames }
     private var rampFrames: Int { 2 * crossfadeFrames }
     /// Frames produced per prediction; the last `rampFrames` are carried over.
     private var emitFrames: Int { hopFrames + rampFrames }
@@ -272,7 +306,23 @@ final class SeparationEngine {
     /// Hand over the model once it finishes loading. Until then the worker runs
     /// passthrough, so audio keeps playing and the switch to separated output
     /// happens at a hop boundary whenever the model turns up.
-    func setModel(_ model: MLModel?) { modelBox.set(model) }
+    ///
+    /// A model whose window differs from this engine's cannot be used: every
+    /// offset into the input array would be wrong. It is refused, and the
+    /// controller rebuilds the pipeline around it.
+    @discardableResult
+    func setModel(_ model: MLModel?) -> Bool {
+        if let model, let w = Self.windowFrames(of: model), w != windowFrames {
+            log.error("""
+                model window \(w, privacy: .public) frames does not match the engine's \
+                \(self.windowFrames, privacy: .public); rebuilding
+                """)
+            modelBox.set(nil)
+            return false
+        }
+        modelBox.set(model)
+        return true
+    }
 
     var hasModel: Bool { modelBox.get() != nil }
 
@@ -327,7 +377,9 @@ final class SeparationEngine {
         hopFrames = Int(hopSeconds * Self.modelRate)
         lookaheadFrames = Int(lookaheadSeconds * Self.modelRate)
         crossfadeFrames = Int(crossfadeSeconds * Self.modelRate)
-        precondition(hopFrames + lookaheadFrames < Self.windowFrames,
+        windowFrames = model.flatMap(Self.windowFrames(of:))
+            ?? Self.storedWindowFrames ?? Self.defaultWindowFrames
+        precondition(hopFrames + lookaheadFrames < windowFrames,
                      "hop + lookahead must leave room for past context")
 
         // Sized for the pause case: while the output is held nothing drains,
@@ -336,9 +388,9 @@ final class SeparationEngine {
         outputRing = RingBuffer(capacityFloats: Int(captureRate * 4.0) * self.channels)
 
         inputArray = try MLMultiArray(
-            shape: [1, 2, NSNumber(value: Self.windowFrames)], dataType: .float32)
+            shape: [1, 2, NSNumber(value: windowFrames)], dataType: .float32)
         memset(inputArray.dataPointer, 0,
-               2 * Self.windowFrames * MemoryLayout<Float>.size)
+               2 * windowFrames * MemoryLayout<Float>.size)
         featureProvider = try MLDictionaryFeatureProvider(
             dictionary: [Self.inputFeature: inputArray])
 
@@ -547,7 +599,7 @@ final class SeparationEngine {
     /// Shift each channel plane left by `count` and append the next `count`
     /// staged frames, in place inside the MLMultiArray.
     private func slideWindow(by count: Int) {
-        let W = Self.windowFrames
+        let W = windowFrames
         let keep = W - count
         let base = inputArray.dataPointer.assumingMemoryBound(to: Float.self)
         for (c, staged) in [stagingL, stagingR].enumerated() {
@@ -623,7 +675,7 @@ final class SeparationEngine {
                     // Passthrough: the same region of the same window, copied
                     // straight from the input. Identical timing to a predicted
                     // hop, which is what makes the switch seamless.
-                    let W = Self.windowFrames
+                    let W = windowFrames
                     let base = inputArray.dataPointer.assumingMemoryBound(to: Float.self)
                     var f = 0
                     while f < elen {

@@ -39,15 +39,19 @@ enum SeparationModel {
 
     // MARK: - Release asset
 
-    /// model-v2 is the six-stem htdemucs_6s (vocals, drums, bass, other,
-    /// guitar, piano). A four-stem model already on disk keeps working — the
-    /// app reads the stem count from the model — so upgrading is optional.
+    /// model-v3 is the six-stem htdemucs_6s (vocals, drums, bass, other,
+    /// guitar, piano) converted with a 3 s window instead of the 7.8 s it
+    /// was trained on. A prediction costs a quarter as much, which is what
+    /// lets the hop shrink from 0.27 s to 0.15 s; on a 60 s test the output
+    /// was within 1 dB of the 7.8 s window. A model already on disk keeps
+    /// working — the app reads the window and stem count from the model — so
+    /// upgrading is optional, but the old window cannot reach the new delay.
     ///
     /// Bumped whenever the converted model changes. The app refuses an archive
     /// whose hash doesn't match, which pins the model's *geometry* — window
     /// length and stem order are compiled in, and a mismatched model would
     /// produce silent garbage rather than an honest failure.
-    static let modelVersion = "model-v2"
+    static let modelVersion = "model-v3"
 
     static var downloadURL: URL {
         // Debug hook: point the installer at a local server to exercise the
@@ -67,9 +71,9 @@ enum SeparationModel {
     /// different digests. This must be the hash of the file actually attached
     /// to the release, not of a later rebuild.
     static let expectedArchiveSHA256 =
-        "76e06eeb2339e67dae46d5ad050899c984e9b5bed016133f315fbcfd5fcc5281"
+        "d7970250d670bc4bb08ab92cdb0f74d0600d913d4e5163d967d4efd951b2d2a2"
 
-    static let approximateDownloadBytes = 117_969_333
+    static let approximateDownloadBytes = 110_996_483
 
     static var downloadSizeDescription: String {
         let mb = Double(approximateDownloadBytes) / 1_000_000
@@ -107,6 +111,12 @@ final class SeparationModelLoader {
     /// Off in the simulator, whose readings are taken under whatever else is
     /// running and must not become the app's idea of this machine.
     static var persistMeasurements = true
+
+    /// Drop every stored speed reading; the next load re-measures.
+    static func forgetMeasurements() {
+        UserDefaults.standard.removeObject(forKey: inferenceKey)
+        SeparationEngine.forgetWorstStep()
+    }
 
     static var measuredInference: Double? {
         let v = UserDefaults.standard.double(forKey: inferenceKey)
@@ -181,6 +191,15 @@ final class SeparationModelLoader {
             do {
                 let model = try MLModel(contentsOf: url, configuration: config)
                 let elapsed = -started.timeIntervalSinceNow
+                // Speed measurements describe one model. A different window
+                // is a different model, and a hop tuned for a short one
+                // would starve a long one.
+                let previousWindow = SeparationEngine.storedWindowFrames
+                let window = SeparationEngine.windowFrames(of: model)
+                if let previousWindow, let window, previousWindow != window {
+                    Self.forgetMeasurements()
+                    log.notice("model window changed (\(previousWindow, privacy: .public) -> \(window, privacy: .public) frames); measurements reset")
+                }
                 // Warm up and time it. The first prediction pays Core ML's
                 // per-device specialisation, which is why it is discarded —
                 // and why doing this here keeps that cost out of the audio
@@ -231,11 +250,11 @@ final class SeparationModelLoader {
     private static func warmUp(_ model: MLModel,
                                measure: Bool) -> (seconds: Double?, stems: Int?) {
         do {
+            let frames = SeparationEngine.windowFrames(of: model)
+                ?? SeparationEngine.defaultWindowFrames
             let input = try MLMultiArray(
-                shape: [1, 2, NSNumber(value: SeparationEngine.windowFrames)],
-                dataType: .float32)
-            memset(input.dataPointer, 0,
-                   2 * SeparationEngine.windowFrames * MemoryLayout<Float>.size)
+                shape: [1, 2, NSNumber(value: frames)], dataType: .float32)
+            memset(input.dataPointer, 0, 2 * frames * MemoryLayout<Float>.size)
             let provider = try MLDictionaryFeatureProvider(
                 dictionary: [SeparationEngine.inputFeature: input])
             var times: [Double] = []

@@ -78,7 +78,7 @@ Spotify ─► Core Audio process tap (muted when tapped) ─► ring buffer
                                                               │
                               ┌───────────────────────────────┘
                               ▼
-              HTDemucs via Core ML, sliding 7.8 s window ─► ring buffer
+              HTDemucs via Core ML, sliding 3 s window ─► ring buffer
                               │
   popup sets semitones ─► Rubber Band R3 ◄── source node
                                   │
@@ -106,11 +106,11 @@ Spotify ─► Core Audio process tap (muted when tapped) ─► ring buffer
 
 ## How the live separation works
 
-Live separation is a sliding-window problem. HTDemucs sees **7.8 seconds at a
-time** and takes about **105 ms** per window on an M4 Max.
+Live separation is a sliding-window problem. HTDemucs sees **3 seconds at a
+time** and takes about **45 ms** per window on an M4 Max.
 
 ```
-     ── 7.8 s window the model actually sees ──
+     ──  3 s window the model actually sees  ──
 ┌───────────────────────────────────────────────┐
 │        past context        │ keep │ lookahead │
 └───────────────────────────────────────────────┘
@@ -136,8 +136,23 @@ curve is shallow: a 60 s run at 0.12 s scored within 0.5 dB of 0.25 s at the
 tenth percentile, and 0.06 s within 0.6 dB. The default is 0.12 s — 130 ms
 of delay for half a dB.
 
-**Delay** is the three added together, `hop + lookahead + inference`, plus a
-small output buffer.
+**Window** is the model's. HTDemucs was trained on 7.8 s segments, and that
+is what the first releases used; every hop then cost a full 7.8 s prediction
+to emit a quarter-second, and the GPU never got the idle time it needs to run
+at full clock (see below). Converted at 3 s the prediction costs a quarter as
+much. On a 60 s test against the 7.8 s window:
+
+| window              | 2 s  | 3 s  | 4 s  | 7.8 s |
+| ------------------- | ---- | ---- | ---- | ----- |
+| quality (dB, median) | 20.9 | 22.1 | 22.3 | 23.1  |
+| prediction, M4 Max  | 33 ms | 45 ms | 70 ms | 113 ms |
+
+Two runs of the *same* 7.8 s model differ from each other at ~23 dB, so 3 s
+and 4 s are within the measurement's own floor; 2 s is audibly rougher.
+
+**Delay** is the three added together, `hop + lookahead + cushion`, plus the
+pitch shifter and two IO buffers (~60 ms). Inference is not in the sum: it
+sets how small the hop and cushion can be, not the delay itself.
 
 ### Hop is chosen automatically
 
@@ -145,15 +160,31 @@ A hop at 40% duty on an M4 Max would demand nearly 300% on an M1, where the
 worker falls permanently behind and the audio breaks up. One hard-coded value
 cannot serve both.
 
-So the model is timed once as it loads, which also absorbs Core ML's first-run
-specialisation and keeps it out of the audio path. The measurement is persisted
-and the hop scaled to roughly **40% GPU duty**, clamped to 0.15–2.0 s:
+So the model is timed as it loads (playback is paused for the load, so the
+measurement is free), the fastest reading is kept, and the hop is scaled to
+roughly **40% GPU duty**, clamped to 0.15–2.0 s:
 
-| Mac       | inference | hop     | delay   |
-| --------- | --------- | ------- | ------- |
-| M4 Max    | ~105 ms   | ~0.26 s | ~0.85 s |
-| mid-range | ~300 ms   | ~0.75 s | ~1.8 s  |
-| M1        | ~700 ms   | ~1.75 s | ~3.8 s  |
+| Mac                   | inference | hop     | delay   |
+| --------------------- | --------- | ------- | ------- |
+| M4 Max                | ~45 ms    | 0.15 s  | ~0.45 s |
+| mid-range (estimated) | ~115 ms   | ~0.29 s | ~0.65 s |
+| M1 (estimated)        | ~270 ms   | ~0.67 s | ~1.1 s  |
+
+A prediction is not a fixed cost. On Apple GPUs it depends on how much idle
+time preceded it — with the 7.8 s window, 113 ms after a quarter-second of
+idle and 245 ms back-to-back — so a hop that leaves the GPU no gap makes
+every prediction slower, and the worker falls behind. That is why the hop
+cannot simply be set to the prediction time, and why the shorter window
+(less work per prediction, more idle per hop) was worth more than any other
+change. `TRANSPOSIFY_PREDICT_BENCH=song.wav .build/release/Transposify`
+measures the curve on any Mac.
+
+The output **cushion** — how much finished audio sits in front of the
+speaker — is sized from the slowest step seen on this machine, capped at
+350 ms. Underruns, pauses and late steps used to deepen the pipeline for
+good; a **governor** now plays up to 3% fast (Rubber Band's time ratio,
+pitch untouched) until the depth is back at its target, so nothing is lost
+and nothing accumulates.
 
 ### Every mix carries the same delay, including All
 

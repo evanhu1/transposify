@@ -161,7 +161,12 @@ final class AudioController {
             }
             self.adoptNewStemsIfAny()
             // Late arrival: the worker picks it up at the next hop boundary.
-            self.separation?.setModel(self.modelLoader.model)
+            // A model with another window cannot be adopted in place; the
+            // pipeline is rebuilt around it instead.
+            if let separation = self.separation,
+               !separation.setModel(self.modelLoader.model) {
+                self.reconfigure()
+            }
             if self.modelLoader.model != nil, self.engaged {
                 self.stepsSettleAt = Date().addingTimeInterval(3)
                 self.stepsSettled = false
@@ -267,8 +272,9 @@ final class AudioController {
            let override = Double(value) { return max(0, override) }
         let inference = SeparationModelLoader.measuredInference
             ?? SeparationEngine.assumedInferenceSeconds
-        // Before the first measurement, assume a tail at twice the median.
-        let worstStep = SeparationEngine.measuredWorstStep ?? (inference * 2.0)
+        // Before the first measurement, assume a tail at three times the
+        // median: the GPU's bursts run that far above it when borrowed.
+        let worstStep = SeparationEngine.measuredWorstStep ?? (inference * 3.0)
         // The extra 50 ms is the wake-up that follows a late step; without it
         // the ring is exactly empty at the worst moment rather than nearly so.
         return max(0.15, min(worstStep, Self.cushionCap) + 0.05)

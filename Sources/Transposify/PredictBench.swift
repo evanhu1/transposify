@@ -22,7 +22,7 @@ enum PredictBench {
         }
         guard let model = loader.model else { emit("FAIL \(loader.error ?? "no model")"); exit(1) }
 
-        let frames = SeparationEngine.windowFrames
+        let frames = SeparationEngine.windowFrames(of: model) ?? SeparationEngine.defaultWindowFrames
         guard let silence = try? MLMultiArray(shape: [1, 2, NSNumber(value: frames)], dataType: .float32),
               let music = try? MLMultiArray(shape: [1, 2, NSNumber(value: frames)], dataType: .float32)
         else { exit(1) }
@@ -32,7 +32,7 @@ enum PredictBench {
             let p = music.dataPointer.assumingMemoryBound(to: Float.self)
             for i in 0..<frames { p[i] = samples.0[i]; p[frames + i] = samples.1[i] }
         } catch {
-            emit("FAIL could not load \(path): \(error)"); exit(1)
+            emit("FAIL could not load \(path): \(String(describing: error))"); exit(1)
         }
         guard let silenceIn = try? MLDictionaryFeatureProvider(dictionary: [SeparationEngine.inputFeature: silence]),
               let musicIn = try? MLDictionaryFeatureProvider(dictionary: [SeparationEngine.inputFeature: music])

@@ -133,6 +133,10 @@ enum PacedSimulator {
                 let v = app.double(forKey: key)
                 if v > 0 { UserDefaults.standard.set(v, forKey: key) }
             }
+            // The window too, or the loader sees a window change here and
+            // wipes the readings just copied.
+            let window = app.integer(forKey: "modelWindowFrames")
+            if window > 0 { UserDefaults.standard.set(window, forKey: "modelWindowFrames") }
         }
 
         do {
