@@ -42,12 +42,20 @@ final class PitchEngine {
     private let ring: RingBuffer
     private let channels: Int
     private let sampleRate: Double
+    private let recorder: SessionRecorder?
+    private let manualRendering: Bool
 
     private var rb: OpaquePointer?
     private var channelBuffers: [UnsafeMutablePointer<Float>]
     private let inputPtrs: UnsafeMutablePointer<UnsafePointer<Float>?>
     private let outputPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private let readScratch: UnsafeMutablePointer<Float>
+    private var manualOutputBuffers: [UnsafeMutablePointer<Float>] = []
+    private typealias RenderCore = (
+        UnsafeMutablePointer<ObjCBool>, Int,
+        UnsafeMutablePointer<UnsafeMutablePointer<Float>?>, Int
+    ) -> OSStatus
+    private var renderCore: RenderCore?
 
     private let targetSemitones = AtomicInt(0)
 
@@ -55,6 +63,7 @@ final class PitchEngine {
         didSet { targetSemitones.set(max(-12, min(12, semitones))) }
     }
     private let holdFlag = AtomicInt(0)
+    private let timeRatioMilli = AtomicInt(1000)
     private let underrunCount = AtomicInt(0)
 
     /// Render pulls that came up short — the output ring ran dry. Any non-zero
@@ -65,6 +74,16 @@ final class PitchEngine {
     /// Called once the pipeline has primed, so the count that follows reflects
     /// real glitches rather than the expected start-up gap.
     func resetUnderruns() { underrunCount.set(0) }
+
+    /// Play slightly fast to give back delay the pipeline accumulated.
+    ///
+    /// Rubber Band's time ratio is output duration over input duration, so a
+    /// ratio below 1 consumes the ring faster than it emits and the pipeline
+    /// gets shallower. Pitch is untouched. Held as thousandths because the
+    /// render callback reads it atomically.
+    var timeRatio: Double = 1.0 {
+        didSet { timeRatioMilli.set(Int((max(0.9, min(1.0, timeRatio)) * 1000).rounded())) }
+    }
 
     /// While held, the render callback outputs silence *without draining the
     /// ring*, after a 10 ms fade. Everything buffered upstream stays put, so
@@ -78,16 +97,22 @@ final class PitchEngine {
     /// Fired (on main) when the audio route/format changes; controller rebuilds.
     var onConfigurationChange: (() -> Void)?
 
-    init(sampleRate: Double, channels: Int, ring: RingBuffer) {
+    init(sampleRate: Double, channels: Int, ring: RingBuffer,
+         recorder: SessionRecorder? = nil, manualRendering: Bool = false) {
         self.sampleRate = sampleRate
         self.channels = max(1, channels)
         self.ring = ring
+        self.recorder = recorder
+        self.manualRendering = manualRendering
         let ch = self.channels
         channelBuffers = (0..<ch).map { _ in .allocate(capacity: Self.maxBlock) }
         inputPtrs = .allocate(capacity: ch)
         outputPtrs = .allocate(capacity: ch)
         readScratch = .allocate(capacity: Self.maxBlock * ch)
         for c in 0..<ch { inputPtrs[c] = UnsafePointer(channelBuffers[c]) }
+        if manualRendering {
+            manualOutputBuffers = (0..<ch).map { _ in .allocate(capacity: Self.maxBlock) }
+        }
     }
 
     deinit {
@@ -95,6 +120,7 @@ final class PitchEngine {
         inputPtrs.deallocate()
         outputPtrs.deallocate()
         readScratch.deallocate()
+        manualOutputBuffers.forEach { $0.deallocate() }
     }
 
     func start() throws {
@@ -121,25 +147,27 @@ final class PitchEngine {
         let outputPtrs = self.outputPtrs
         let targetSemitones = self.targetSemitones
         let appliedSemitones = IntBox()
+        let timeRatioMilli = self.timeRatioMilli
+        let appliedRatioMilli = IntBox()
         let holdFlag = self.holdFlag
         let underrunCount = self.underrunCount
         let holdGain = FloatBox()
         let gainStep = Float(1.0 / (0.010 * sampleRate))   // 10 ms fade
+        let recording = recorder?.outputSink
 
-        let node = AVAudioSourceNode(format: format) { isSilence, _, frameCount, ablPtr in
-            let abl = UnsafeMutableAudioBufferListPointer(ablPtr)
-            let frames = Int(frameCount)
-
+        let core: RenderCore = { isSilence, frames, destinations, destinationChannels in
             // Fully held: silence, and crucially, do not consume the ring.
             let holdTarget: Float = holdFlag.get() == 1 ? 0 : 1
             if holdTarget == 0 && holdGain.value == 0 {
-                for c in 0..<min(ch, abl.count) {
-                    if let dst = abl[c].mData?.assumingMemoryBound(to: Float.self) {
+                for c in 0..<min(ch, destinationChannels) {
+                    if let dst = destinations[c] {
                         var f = 0
                         while f < frames { dst[f] = 0; f += 1 }
                     }
                 }
                 isSilence.pointee = true
+                recording?.writePlanar(UnsafePointer(destinations),
+                                       availableChannels: destinationChannels, frames: frames)
                 return noErr
             }
 
@@ -147,6 +175,12 @@ final class PitchEngine {
             if semis != appliedSemitones.value {
                 appliedSemitones.value = semis
                 rubberband_set_pitch_scale(state, pow(2.0, Double(semis) / 12.0))
+            }
+
+            let ratioMilli = timeRatioMilli.get()
+            if ratioMilli != appliedRatioMilli.value {
+                appliedRatioMilli.value = ratioMilli
+                rubberband_set_time_ratio(state, Double(ratioMilli) / 1000)
             }
 
             // Feed Rubber Band from the ring until it can produce a full buffer
@@ -169,21 +203,20 @@ final class PitchEngine {
 
             let available = Int(rubberband_available(state))
             let toRetrieve = max(0, min(frames, available))
-            for c in 0..<min(ch, abl.count) {
-                outputPtrs[c] = abl[c].mData?.assumingMemoryBound(to: Float.self)
-            }
             if toRetrieve > 0 {
-                _ = rubberband_retrieve(state, UnsafePointer(outputPtrs), UInt32(toRetrieve))
+                _ = rubberband_retrieve(state, UnsafePointer(destinations), UInt32(toRetrieve))
             }
             if toRetrieve < frames {
-                for c in 0..<min(ch, abl.count) {
-                    if let dst = abl[c].mData?.assumingMemoryBound(to: Float.self) {
+                for c in 0..<min(ch, destinationChannels) {
+                    if let dst = destinations[c] {
                         var f = toRetrieve
                         while f < frames { dst[f] = 0; f += 1 }
                     }
                 }
                 if toRetrieve == 0 { isSilence.pointee = true }
                 underrunCount.add(1)
+                recording?.underrun(shortFrames: frames - toRetrieve,
+                                    ringFrames: ring.availableToRead / ch)
             }
 
             // Ramp toward the hold target so pause/resume never clicks. The
@@ -196,29 +229,62 @@ final class PitchEngine {
                     } else {
                         g = max(holdTarget, g - gainStep)
                     }
-                    for c in 0..<min(ch, abl.count) {
-                        if let dst = abl[c].mData?.assumingMemoryBound(to: Float.self) {
+                    for c in 0..<min(ch, destinationChannels) {
+                        if let dst = destinations[c] {
                             dst[f] *= g
                         }
                     }
                 }
                 holdGain.value = g
             }
+            recording?.writePlanar(UnsafePointer(destinations),
+                                   availableChannels: destinationChannels, frames: frames)
             return noErr
         }
+        renderCore = core
 
-        sourceNode = node
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
-
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            self?.onConfigurationChange?()
+        if manualRendering {
+            for channel in 0..<channels { outputPtrs[channel] = manualOutputBuffers[channel] }
+        } else {
+            let node = AVAudioSourceNode(format: format) { isSilence, _, frameCount, ablPtr in
+                let buffers = UnsafeMutableAudioBufferListPointer(ablPtr)
+                let count = min(ch, buffers.count)
+                for channel in 0..<count {
+                    outputPtrs[channel] = buffers[channel].mData?.assumingMemoryBound(to: Float.self)
+                }
+                return core(isSilence, Int(frameCount), outputPtrs, count)
+            }
+            sourceNode = node
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+            configObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+            ) { [weak self] _ in
+                self?.onConfigurationChange?()
+            }
+            engine.prepare()
+            try engine.start()
         }
+    }
 
-        engine.prepare()
-        try engine.start()
+    /// Pulls the same source-node callback used by the live output device.
+    func renderOffline(frames: Int, into output: UnsafeMutablePointer<Float>) throws {
+        guard manualRendering, frames <= Self.maxBlock, let renderCore else {
+            throw NSError(domain: "TransposifySimulator", code: -2)
+        }
+        var isSilence = ObjCBool(false)
+        _ = withUnsafeMutablePointer(to: &isSilence) {
+            renderCore($0, frames, outputPtrs, channels)
+        }
+        var frame = 0
+        while frame < frames {
+            var channel = 0
+            while channel < channels {
+                output[frame * channels + channel] = manualOutputBuffers[channel][frame]
+                channel += 1
+            }
+            frame += 1
+        }
     }
 
     func stop() {
@@ -226,12 +292,13 @@ final class PitchEngine {
             NotificationCenter.default.removeObserver(observer)
             configObserver = nil
         }
-        engine.stop()
+        if !manualRendering { engine.stop() }
         if let node = sourceNode {
             engine.detach(node)
             sourceNode = nil
         }
         if let state = rb {
+            renderCore = nil
             rubberband_delete(state)
             rb = nil
         }

@@ -104,6 +104,10 @@ final class SeparationModelLoader {
     /// necessarily resident, and it must not change while audio is flowing.
     private static let inferenceKey = "measuredInferenceSeconds"
 
+    /// Off in the simulator, whose readings are taken under whatever else is
+    /// running and must not become the app's idea of this machine.
+    static var persistMeasurements = true
+
     static var measuredInference: Double? {
         let v = UserDefaults.standard.double(forKey: inferenceKey)
         return v > 0 ? v : nil
@@ -181,23 +185,32 @@ final class SeparationModelLoader {
                 // per-device specialisation, which is why it is discarded —
                 // and why doing this here keeps that cost out of the audio
                 // path entirely.
-                // Warm up always — the first prediction pays Core ML's
-                // per-device specialisation, and paying it here keeps it out
-                // of the audio path. Only *time* it when there is no stored
-                // measurement: three back-to-back window predictions are
-                // enough GPU work to disturb playback, and the number only
-                // needs establishing once.
+                //
+                // Timing used to happen only once, because three back-to-back
+                // window predictions are enough GPU work to disturb playback.
+                // Playback is now stopped for the whole load, so the
+                // measurement is free and can be taken every time — which is
+                // what lets the hop follow the machine instead of remembering
+                // one reading from months ago.
                 let existing = Self.measuredInference
-                let warm = Self.warmUp(model, measure: existing == nil)
-                let inference = warm.seconds ?? existing
+                let warm = Self.warmUp(model, measure: true)
+                // Keep the *fastest* reading. Contention — another process on
+                // the GPU, a thermal dip — only ever makes a reading slower,
+                // so the minimum is the machine's real capability. A blend
+                // was tried first and a single contended load doubled the
+                // stored value, which doubled the hop and the delay with it.
+                let inference = warm.seconds.map { observed in
+                    existing.map { min($0, observed) } ?? observed
+                } ?? existing
                 DispatchQueue.main.async {
                     self.stemCount = warm.stems
                     log.notice("""
                         separation model loaded in \(String(format: "%.1f", elapsed), privacy: .public)s, \
-                        inference \(String(format: "%.0f", (inference ?? 0) * 1000), privacy: .public) ms, \
+                        inference \(String(format: "%.0f", (inference ?? 0) * 1000), privacy: .public) ms \
+                        (this load measured \(String(format: "%.0f", (warm.seconds ?? 0) * 1000), privacy: .public) ms), \
                         stems \(self.stemCount ?? -1, privacy: .public)
                         """)
-                    if let inference {
+                    if let inference, Self.persistMeasurements {
                         UserDefaults.standard.set(inference, forKey: Self.inferenceKey)
                     }
                     self.state = .ready(model)
@@ -230,12 +243,14 @@ final class SeparationModelLoader {
             let runs = measure ? 3 : 1
             for i in 0..<runs {
                 let t = Date()
-                let out = try model.prediction(from: provider)
-                if i > 0 { times.append(-t.timeIntervalSinceNow) }
-                if stems == nil,
-                   let shape = out.featureValue(for: SeparationEngine.outputFeature)?
-                       .multiArrayValue?.shape.map(\.intValue), shape.count > 1 {
-                    stems = shape[1]
+                try autoreleasepool {
+                    let out = try model.prediction(from: provider)
+                    if i > 0 { times.append(-t.timeIntervalSinceNow) }
+                    if stems == nil,
+                       let shape = out.featureValue(for: SeparationEngine.outputFeature)?
+                           .multiArrayValue?.shape.map(\.intValue), shape.count > 1 {
+                        stems = shape[1]
+                    }
                 }
                 // Let the audio worker have the GPU between runs.
                 if i < runs - 1 { Thread.sleep(forTimeInterval: 0.05) }

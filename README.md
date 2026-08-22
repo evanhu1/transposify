@@ -164,8 +164,22 @@ So **All** runs the same window and hop machinery and copies the input instead
 of predicting it: same delay, no GPU. Switching is then only a flag. The worker
 already holds the history and lookahead the new mix needs, so the next block
 comes out changed and the existing crossfade joins it to the previous one. No
-gap, no repeat, no drift. Preparation, including a cold model load, happens
-underneath audio that keeps playing.
+gap, no repeat, no drift.
+
+Every control the user can click still takes a moment to reach the ears: the
+change enters at the front of the pipeline and has to travel its whole delay.
+So the popover dims the controls and says "Loading…" from the click until
+the audio matches them — about a second and a half for a mix change, longer for
+a cold load. The dim is the same one the Off button uses, and it means the same
+thing: what you see is not what is playing yet.
+
+A cold model load is the one wait that audio cannot cover. The pipeline plays
+the mix through until the model is resident, so the vocal you asked to remove
+would keep playing for those seconds. Transposify pauses Spotify instead and
+plays again the moment the model is ready, so the first note you hear is the
+mix you asked for. Press play yourself during the load and it lets you.
+Without Automation permission it cannot pause, and the audio plays through as
+before.
 
 ## Diagnostics & tests
 
@@ -174,6 +188,31 @@ swift probe.swift                              # OSStatus of each Core Audio tap
 TRANSPOSIFY_SELFTEST=1 .build/debug/Transposify  # headless engagement state-machine test
 TRANSPOSIFY_RBTEST=1   .build/debug/Transposify  # Rubber Band pitch-accuracy check (440Hz +7st)
 ```
+
+Record an engaged session and analyze its samples, delay, worker timing, ring
+depth and underruns:
+
+```sh
+TRANSPOSIFY_RECORD=/tmp/transposify-session \
+TRANSPOSIFY_RECORD_AUTOSTOP=60 .build/debug/Transposify
+tools/analyze-session.sh /tmp/transposify-session
+```
+
+Run the same pipeline from a file under a paced 512-frame audio clock:
+
+```sh
+TRANSPOSIFY_SIMULATE=tools/test-audio/song.wav:/tmp/transposify-sim \
+TRANSPOSIFY_SIM_SECONDS=30 \
+TRANSPOSIFY_SIM_SCRIPT="5:pause,7:play,12:vocals,20:all,25:backing,30:+3,40:track" \
+.build/debug/Transposify
+```
+
+`TRANSPOSIFY_HOP`, `TRANSPOSIFY_LOOKAHEAD`, and `TRANSPOSIFY_CUSHION` override
+their corresponding seconds only when set. `TRANSPOSIFY_GOVERNOR=0` disables
+the depth governor. `TRANSPOSIFY_SIM_SPEED=2` runs the clock twice as fast with
+proportionally tighter worker deadlines, so it is useful for stress but less
+faithful to live playback. `tools/bench.sh <in.wav> [--secs N]` runs the standard
+configuration sweep.
 
 To build without installing: `./make-app.sh && open Transposify.app`.
 

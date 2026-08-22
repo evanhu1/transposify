@@ -97,6 +97,17 @@ final class SpotifyState {
         onChange?()
     }
 
+    /// Ask Spotify to start or stop playing.
+    ///
+    /// Returns whether the command reached Spotify: it needs automation
+    /// permission, and without it nothing happens. The caller has to know,
+    /// because a pause that never landed must not be followed by a resume.
+    @discardableResult
+    func setPlaying(_ playing: Bool) -> Bool {
+        guard isRunning else { return false }
+        return execute("tell application \"Spotify\" to \(playing ? "play" : "pause")") != nil
+    }
+
     /// Snapshot/testing only: present a fixed now-playing track.
     func injectSnapshotTrack(name: String, artist: String) {
         isRunning = true
@@ -105,6 +116,13 @@ final class SpotifyState {
     }
 
     private func runAppleScript(_ source: String) -> String? {
+        execute(source)?.stringValue
+    }
+
+    /// Runs a script and returns its result, or nil if it failed. A command
+    /// with no result still returns a descriptor, so nil means an error — which
+    /// is what tells `setPlaying` whether the command landed.
+    private func execute(_ source: String) -> NSAppleEventDescriptor? {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
         if let error {
@@ -124,6 +142,6 @@ final class SpotifyState {
             return nil
         }
         if automation != .granted { automation = .granted }
-        return result?.stringValue
+        return result
     }
 }

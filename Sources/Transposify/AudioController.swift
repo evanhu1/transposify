@@ -106,6 +106,21 @@ final class AudioController {
     /// output hasn't started yet.
     private(set) var priming = false
 
+    /// The capture position the listener has to reach before a mix change is
+    /// what they are hearing. Set on the click, cleared by the watchdog.
+    private var mixTarget: Int?
+
+    /// The ears have not caught up with the controls. Three things cause it: a
+    /// cold model load, the pipeline filling its buffer, and a mix change
+    /// travelling the pipeline's delay. All three are seconds long, and
+    /// without a signal the click that started them reads as ignored.
+    ///
+    /// Only while playing: nothing travels a stopped pipeline, so a change made
+    /// while paused is not late, it is simply waiting.
+    var catchingUp: Bool {
+        preparingModel || ((priming || mixTarget != nil) && spotifyPlaying)
+    }
+
     var onChange: (() -> Void)?
 
     private static let enabledKey = "globalEnabled"
@@ -186,6 +201,14 @@ final class AudioController {
     var needsModel: Bool { !currentSelection.isPassthrough }
 
     var preparingModel: Bool { needsModel && modelLoader.isLoading }
+    var modelReadyForSimulation: Bool { modelLoader.model != nil }
+
+    /// True while playback is stopped because the model is still loading.
+    private(set) var pausedForModelLoad = false
+    /// This load has already had its one pause. Without it, a user who presses
+    /// play mid-load gets paused again on the very next update.
+    private var modelLoadPauseSpent = false
+    private var resumeWork: DispatchWorkItem?
 
     private var currentTrackID: String?
     private var hasTrack = false
@@ -194,9 +217,10 @@ final class AudioController {
     private var permissionDenied = false
     private var lastError: String?
 
-    private var capture: AudioCapture?
+    private var capture: AudioSource?
     private var engine: PitchEngine?
     private var separation: SeparationEngine?
+    private var recorder: SessionRecorder?
     private var separationWatchdog: DispatchSourceTimer?
     private let modelLoader = SeparationModelLoader()
     let modelInstaller = SeparationModelInstaller()
@@ -208,39 +232,155 @@ final class AudioController {
     private var coasting = false
     private var reconfiguring = false
 
+    /// Headless simulation injects a file-backed source and manual output.
+    var audioSourceFactory: ((SessionRecorder?) throws -> AudioSource)?
+    var simulationMode = false
+
     /// A track change reaches the ears ~0.6 s after Spotify reports it (the
     /// separation pipeline's depth), so the new track's saved transpose must
     /// wait for its audio. `target` is the staged-frame position of the
     /// boundary; the watchdog applies `value` once consumption passes it.
     private var pendingSemitones: (target: Int, value: Int)?
     private var lastUnderrunLog = 0
+    /// Watchdog ticks since engaging, so the depth log stays sparse.
+    private var depthTicks = 0
 
     /// Buffered audio to build before letting playback start, in ring floats.
     ///
-    /// This is the floor under the output ring, and it is what a mode switch
-    /// spends. Switching a full mix to a separated one turns a hop that cost
-    /// nothing into one that costs an inference, so production lands one
-    /// inference later and the ring drains by exactly that much. If the floor
-    /// is thinner than the worst hop, that switch is audible.
+    /// This is the floor under the output ring, and it has to cover one whole
+    /// step: if a step takes longer than the ring holds, the render side plays
+    /// silence, and that silence is never given back — the delay grows by
+    /// exactly its length and stays grown. Every underrun is a permanent
+    /// deepening, so the ring is sized against the *slowest* step measured on
+    /// this machine, not the median one.
     ///
-    /// Two terms, because two different things go wrong. `inference * 1.5`
-    /// covers slow hardware, where inference dominates. The `+ 0.12` covers
-    /// fast hardware, where inference is small but ordinary scheduling jitter
-    /// is not — a 105 ms inference with a 1.5 multiplier leaves only ~50 ms of
-    /// absolute headroom, which one late thread wake-up eats. The floor costs
-    /// latency, so it is the smallest number that survives both.
-    private var cushionFloats: Int {
+    /// It used to be sized from median inference, which on this Mac asked for
+    /// 228 ms against steps that reached 362 ms. The pipeline then drifted from
+    /// 0.7 s to 1.7 s over a few minutes of listening, one underrun at a time.
+    /// Buying the tail up front is cheaper than paying for it in drift.
+    private var cushionSeconds: Double {
+        if let value = ProcessInfo.processInfo.environment["TRANSPOSIFY_CUSHION"],
+           let override = Double(value) { return max(0, override) }
         let inference = SeparationModelLoader.measuredInference
             ?? SeparationEngine.assumedInferenceSeconds
-        let seconds = max(0.15, max(inference * 1.5, inference + 0.12))
+        // Before the first measurement, assume a tail at twice the median.
+        let worstStep = SeparationEngine.measuredWorstStep ?? (inference * 2.0)
+        // The extra 50 ms is the wake-up that follows a late step; without it
+        // the ring is exactly empty at the worst moment rather than nearly so.
+        return min(SeparationEngine.maxWorstStep + 0.05, max(0.15, worstStep + 0.05))
+    }
+
+    /// Ring occupancy that ends priming, in floats. Fixed at engage: it
+    /// decides when playback starts, so it must not move underneath a
+    /// pipeline that is already filling.
+    ///
+    /// This is the cushion *plus one hop*, and the hop is not optional. The
+    /// first publish leaves exactly one hop in the ring and nothing in
+    /// staging; the next step cannot begin until a further hop of input has
+    /// arrived, and the ring drains by that whole hop while it waits. Release
+    /// on the cushion alone and the second step starts against an empty ring,
+    /// so its prediction time is an underrun every single time — the clip the
+    /// listener hears a second after every switch. Waiting for the second
+    /// publish costs no latency the design did not already budget: the target
+    /// depth is `hop + lookahead + cushion`, and this is the moment the ring
+    /// first holds it.
+    private var primeFloats = 0
+    /// What the pipeline's depth should be, in seconds, set at engage.
+    private var targetDepth = 0.0
+    /// Playback speed the governor is asking for, 1.0 when it is idle.
+    private var governorRatio = 1.0
+
+    // MARK: - The depth governor
+
+    /// Two things deepen the pipeline and neither reverses on its own. An
+    /// underrun plays silence the listener never gets back, so the audio behind
+    /// it lands later, for good. A pause keeps the audio captured just before
+    /// it — real song content, worth keeping — but that audio has to go
+    /// somewhere, and where it goes is the delay. Both are one-way, and a
+    /// listening session with a few dozen of either drifts from 0.7 s to 1.7 s.
+    ///
+    /// Neither is a bug to remove: dropping the silence or the pre-pause audio
+    /// would mean losing audio, which this pipeline never does. So give the
+    /// time back instead of the audio. Playing 1.5% fast for twenty seconds
+    /// returns 300 ms with no gap, no repeat, and no change in pitch.
+    private static let governorSlack = 0.08      // ignore drift below this
+    private static let governorGentle = 0.985    // 1.5% fast
+    private static let governorBrisk = 0.97      // 3% fast, past half a second
+    /// Watchdog ticks (0.25 s) a reading must persist before the governor
+    /// acts on it. A ratio change makes Rubber Band pull a chunk from the ring
+    /// as it re-buffers, and that dip looked like "back at target" — so the
+    /// governor released, the ring refilled, and it engaged again, four times a
+    /// second. Agreement over a second is what a real change looks like.
+    private static let governorEngageTicks = 2
+    private static let governorReleaseTicks = 4
+    private var governorAgreeTicks = 0
+    private var governorProposed = 1.0
+
+    private func updateGovernor(_ separation: SeparationEngine) {
+        if ProcessInfo.processInfo.environment["TRANSPOSIFY_GOVERNOR"] == "0" {
+            if governorRatio != 1.0 { releaseGovernor(depth: nil) }
+            return
+        }
+        guard let engine, !priming, spotifyPlaying, targetDepth > 0 else {
+            if governorRatio != 1.0 { releaseGovernor(depth: nil) }
+            governorAgreeTicks = 0
+            return
+        }
         let rate = capture?.sampleRate ?? 48_000
-        let channels = capture?.channelCount ?? 2
-        return Int(seconds * rate) * channels
+        let depth = Double(separation.stagedCaptureFrames
+            - separation.consumedCaptureFrames) / rate
+        let excess = depth - targetDepth
+
+        let wanted: Double
+        if excess > 0.5 {
+            wanted = Self.governorBrisk
+        } else if excess > Self.governorSlack {
+            wanted = Self.governorGentle
+        } else if excess < 0.02 {
+            wanted = 1.0
+        } else {
+            wanted = governorRatio          // hysteresis: finish what we started
+        }
+        if wanted == governorRatio { governorAgreeTicks = 0; governorProposed = wanted; return }
+        // A new proposal has to hold for a while before it is acted on.
+        if wanted == governorProposed {
+            governorAgreeTicks += 1
+        } else {
+            governorProposed = wanted
+            governorAgreeTicks = 1
+        }
+        let needed = wanted == 1.0 ? Self.governorReleaseTicks : Self.governorEngageTicks
+        guard governorAgreeTicks >= needed else { return }
+        governorAgreeTicks = 0
+        if wanted == 1.0 {
+            releaseGovernor(depth: depth)
+        } else {
+            governorRatio = wanted
+            engine.timeRatio = wanted
+            recorder?.governor(ratio: wanted, depth: depth, target: targetDepth)
+            log.notice("""
+                governor \(String(format: "%.1f", (1 - wanted) * 100), privacy: .public)% fast: \
+                depth \(String(format: "%.2f", depth), privacy: .public)s vs target \
+                \(String(format: "%.2f", self.targetDepth), privacy: .public)s
+                """)
+        }
+    }
+
+    private func releaseGovernor(depth: Double?) {
+        governorRatio = 1.0
+        engine?.timeRatio = 1.0
+        recorder?.governor(ratio: 1.0, depth: depth, target: targetDepth)
+        let at = depth.map { String(format: " at %.2fs", $0) } ?? ""
+        log.notice("governor released\(at, privacy: .public)")
     }
 
     /// When set, engage/disengage drive these stubs instead of real audio —
     /// used by the headless self-test to verify the state machine.
     var testHooks: (engage: (Int, Bool) -> Void, disengage: () -> Void)?
+
+    /// Tells Spotify to play or pause, and reports whether the command landed.
+    /// The app delegate wires this to `SpotifyState`; it is nil in tests.
+    var setSpotifyPlaying: ((Bool) -> Bool)?
 
     // MARK: - Inputs from Spotify
 
@@ -252,6 +392,7 @@ final class AudioController {
         if trackChanged {
             currentTrackID = trackID
             hasTrack = trackID != nil
+            recorder?.track(trackID)
             loadSettingForCurrentTrack()
         }
         // A coasting pipeline gives its latency back here, and only here: at a
@@ -312,6 +453,7 @@ final class AudioController {
         persistSelection()
         if needsModel { lastError = nil; modelLoader.prepare() } else { releaseModelIfIdle() }
         applySelection()
+        noteMixChange()
         updateEngagement()
         onChange?()
     }
@@ -324,6 +466,7 @@ final class AudioController {
         persistSelection()
         if needsModel { modelLoader.prepare() }
         applySelection()
+        noteMixChange()
         updateEngagement()
         onChange?()
     }
@@ -331,6 +474,7 @@ final class AudioController {
     func includes(_ stem: Stem) -> Bool { stemMask & (1 << stem.rawValue) != 0 }
 
     private func persistSelection() {
+        guard !simulationMode else { return }
         let defaults = UserDefaults.standard
         defaults.set(stemMask, forKey: Self.stemMaskKey)
         defaults.set(stemCount, forKey: Self.stemMaskCountKey)
@@ -347,6 +491,22 @@ final class AudioController {
 
     private func applySelection() {
         separation?.setSelection(currentSelection)
+        recorder?.selection(stemMask: stemMask, passthrough: currentSelection.isPassthrough)
+    }
+
+    /// Remember where the listener has to get to before a mix change is what
+    /// they are hearing; the watchdog says when they are there.
+    ///
+    /// Two waits, in order. The block being predicted right now still carries
+    /// the old mix, so the change reaches the ring one hop after production
+    /// stands — and the ears one ring-drain after that. Together that is the
+    /// second and a half between the click and the vocal going away.
+    ///
+    /// With no pipeline up, engaging is the wait, and `priming` already covers
+    /// it — a target taken now would be against a ring that does not exist.
+    private func noteMixChange() {
+        guard let separation, engaged, separation.failure == nil else { return }
+        mixTarget = separation.publishedCaptureFrames + separation.hopCaptureFrames
     }
 
     /// A model with more stems than the saved selection knew about turns the
@@ -392,10 +552,14 @@ final class AudioController {
 
     func shutdown() {
         disengageWork?.cancel()
+        // Quitting with the music stopped by us would leave it stopped.
+        if pausedForModelLoad { resumeAfterModelLoad() }
         disengage()
+        recorder?.finish(); recorder = nil
     }
 
     private func persistIfRemembering() {
+        guard !simulationMode else { return }
         guard rememberThisSong, let id = currentTrackID else { return }
         if semitones == 0 {
             store.remove(for: id) // don't keep a no-op entry
@@ -409,6 +573,7 @@ final class AudioController {
     /// The pipeline has a reason to exist (regardless of playback state).
     private var pipelineUseful: Bool {
         guard enabled, spotifyRunning, hasTrack else { return false }
+        if simulationMode { return true }
         // Advanced with every stem checked is the untouched mix, so it is not
         // a reason to engage — the tap would mute Spotify to hand back what
         // Spotify was already playing.
@@ -461,6 +626,7 @@ final class AudioController {
             if engaged {
                 if let engine, engine.hold, !priming {
                     engine.hold = false
+                    recorder?.hold(false)
                     log.notice("hold released\(self.flightDescription(), privacy: .public)")
                 }
             } else {
@@ -472,6 +638,7 @@ final class AudioController {
             coasting = false
             if let engine, !engine.hold {
                 engine.hold = true
+                recorder?.hold(true)
                 log.notice("""
                     held (paused with \(self.preset?.rawValue ?? "custom", privacy: .public) \
                     pipeline intact)\(self.flightDescription(), privacy: .public)
@@ -490,6 +657,65 @@ final class AudioController {
         } else {
             scheduleDisengage()
         }
+        updateModelLoadPause()
+    }
+
+    // MARK: - Pausing while the model loads
+
+    /// The pipeline runs while the model loads, and until the model arrives it
+    /// passes the mix through — so for those seconds the vocal the user just
+    /// asked to remove keeps playing. Stopping Spotify instead means the first
+    /// note they hear is the mix they asked for.
+    private var waitingForModel: Bool {
+        pipelineUseful && needsModel && modelLoader.isLoading
+    }
+
+    /// Longest a load may keep the music stopped. Loading takes 1.5–7 s; if it
+    /// ever takes longer than this, playback comes back anyway. Music that
+    /// never restarts is a worse failure than a vocal that gets through.
+    private static let modelLoadPauseLimit: TimeInterval = 20
+
+    private func updateModelLoadPause() {
+        guard waitingForModel else {
+            if pausedForModelLoad { resumeAfterModelLoad() }
+            modelLoadPauseSpent = false
+            return
+        }
+        // Playing again while we hold the pause means the user pressed play.
+        // They win: let it run, and stop owing a resume.
+        if pausedForModelLoad, spotifyPlaying {
+            log.notice("play pressed during the model load; leaving playback alone")
+            clearModelLoadPause()
+            return
+        }
+        guard !modelLoadPauseSpent, spotifyPlaying else { return }
+        modelLoadPauseSpent = true
+        // Without automation permission the command never lands, and a pause
+        // we did not make is not ours to undo.
+        guard setSpotifyPlaying?(false) == true else { return }
+        pausedForModelLoad = true
+        log.notice("paused Spotify while the separation model loads")
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.pausedForModelLoad else { return }
+            log.error("model load outlasted the pause limit; resuming playback")
+            self.resumeAfterModelLoad()
+            self.onChange?()
+        }
+        resumeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.modelLoadPauseLimit, execute: work)
+    }
+
+    /// Give the music back. Callers refresh the UI themselves.
+    private func resumeAfterModelLoad() {
+        clearModelLoadPause()
+        _ = setSpotifyPlaying?(true)
+        log.notice("model load finished; resuming playback")
+    }
+
+    private func clearModelLoadPause() {
+        resumeWork?.cancel()
+        resumeWork = nil
+        pausedForModelLoad = false
     }
 
     /// Debounced so scrubbing through 0 doesn't tear down and rebuild the tap.
@@ -513,7 +739,9 @@ final class AudioController {
             return
         }
         do {
-            let capture = AudioCapture()
+            let recorder = try SessionRecorder.requested()
+            self.recorder = recorder
+            let capture = try audioSourceFactory?(recorder) ?? AudioCapture(recorder: recorder)
             try capture.start()
 
             // The neural path sits between capture and pitch shifting and is
@@ -522,11 +750,19 @@ final class AudioController {
             // just a delay line and costs no GPU. That uniform delay is what
             // makes switching seamless: without it, going from a live stream to
             // a delayed one has to gap, repeat, or bend time.
+            let env = ProcessInfo.processInfo.environment
+            let hop = Double(env["TRANSPOSIFY_HOP"] ?? "")
+                ?? SeparationEngine.defaultHopSeconds
+            let lookahead = Double(env["TRANSPOSIFY_LOOKAHEAD"] ?? "")
+                ?? SeparationEngine.defaultLookaheadSeconds
             let separation = try SeparationEngine(
                 captureRate: capture.sampleRate,
                 channels: capture.channelCount,
                 inputRing: capture.ring,
-                model: modelLoader.model)
+                model: modelLoader.model,
+                hopSeconds: hop,
+                lookaheadSeconds: lookahead,
+                recording: recorder?.stepSink)
             log.notice("""
                 pipeline: hop \(String(format: "%.2f", separation.hopSeconds), privacy: .public)s \
                 delay \(String(format: "%.2f", separation.nominalDelay), privacy: .public)s \
@@ -537,10 +773,22 @@ final class AudioController {
             self.separation = separation
             let sourceRing = separation.outputRing
             priming = true
+            depthTicks = 0
+            let cushion = cushionSeconds
+            primeFloats = Int((cushion + separation.hopSeconds) * capture.sampleRate)
+                * capture.channelCount
+            targetDepth = separation.nominalDelay + cushion
+            governorRatio = 1.0
+            log.notice("""
+                cushion \(String(format: "%.0f", self.cushionSeconds * 1000), privacy: .public) ms                 (worst step \(String(format: "%.0f", (SeparationEngine.measuredWorstStep ?? 0) * 1000), privacy: .public) ms),                 expected depth \(String(format: "%.2f", separation.nominalDelay + self.cushionSeconds), privacy: .public)s
+                """)
+            // Fade the mark so one bad session cannot charge every later one.
+            SeparationEngine.decayWorstStep()
             startSeparationWatchdog()
 
             let engine = PitchEngine(sampleRate: capture.sampleRate,
-                                     channels: capture.channelCount, ring: sourceRing)
+                                     channels: capture.channelCount, ring: sourceRing,
+                                     recorder: recorder, manualRendering: simulationMode)
             engine.semitones = semitones
             engine.onConfigurationChange = { [weak self] in self?.reconfigure() }
             // Hold output until a cushion of audio exists. Releasing as soon as
@@ -549,11 +797,18 @@ final class AudioController {
             // shifts production later by one inference — empties it and drops
             // samples. The cushion is the floor that absorbs them.
             engine.hold = true
+            recorder?.hold(true)
             try engine.start()
             self.capture = capture
             self.engine = engine
             engaged = true
             lastError = nil
+            recorder?.engage(sampleRate: capture.sampleRate, channels: capture.channelCount,
+                hopSeconds: separation.hopSeconds,
+                lookaheadSeconds: Double(separation.lookaheadFrames) / SeparationEngine.modelRate,
+                cushionSeconds: cushion, targetDepth: targetDepth, semitones: semitones,
+                stemMask: stemMask, stemCount: stemCount)
+            recorder?.track(currentTrackID)
             log.notice("""
                 engaged: \(capture.sampleRate, privacy: .public) Hz, \
                 pitch \(self.semitones, privacy: .public) st, \
@@ -567,6 +822,22 @@ final class AudioController {
             log.error("engage failed: \(self.lastError ?? "", privacy: .public)")
         }
         onChange?()
+    }
+
+    func renderSimulation(frames: Int, into output: UnsafeMutablePointer<Float>) throws {
+        guard simulationMode, let engine else {
+            throw NSError(domain: "TransposifySimulator", code: -1)
+        }
+        try engine.renderOffline(frames: frames, into: output)
+    }
+
+    var simulationStats: (underruns: Int, worstStep: Double, minRing: Int, depth: Double) {
+        let rate = capture?.sampleRate ?? 48_000
+        let depth = separation.map {
+            Double($0.stagedCaptureFrames - $0.consumedCaptureFrames) / rate
+        } ?? 0
+        return (engine?.underruns ?? 0, separation?.maxStepSeconds ?? 0,
+                separation?.minOutputFrames ?? 0, depth)
     }
 
     /// Frames captured but not yet heard. Across a pause this must stay put:
@@ -606,9 +877,10 @@ final class AudioController {
                 self.onChange?()
                 return
             }
-            if self.priming, separation.outputRing.availableToRead >= self.cushionFloats {
+            if self.priming, separation.outputRing.availableToRead >= self.primeFloats {
                 self.priming = false
                 self.engine?.hold = false
+                self.recorder?.hold(false)
                 // Underruns before this point are the start-up gap, which is
                 // unavoidable when the pipeline builds its buffer from empty.
                 self.engine?.resetUnderruns()
@@ -618,6 +890,33 @@ final class AudioController {
                 separation.resetMargins()
                 self.onChange?()
             }
+            // Keep the high-water mark that sizes the next cushion. Only new
+            // maxima write, so this is a handful of writes per session.
+            SeparationEngine.recordWorstStep(separation.maxStepSeconds)
+
+            let rate = self.capture?.sampleRate ?? 48_000
+            let staged = separation.stagedCaptureFrames
+            let consumed = separation.consumedCaptureFrames
+            self.recorder?.depth(stagedFrames: staged, consumedFrames: consumed,
+                ringFrames: separation.outputRing.availableToRead / (self.capture?.channelCount ?? 2),
+                depthSeconds: Double(staged - consumed) / rate)
+
+            // The number this whole design is judged on: how far behind
+            // Spotify the listener actually is. Logged sparsely so a session
+            // can be read back without drowning in it.
+            if !self.priming, self.spotifyPlaying {
+                self.depthTicks += 1
+                if self.depthTicks % 60 == 0 {   // 0.25 s poll -> every 15 s
+                    let depth = Double(separation.stagedCaptureFrames
+                        - separation.consumedCaptureFrames) / rate
+                    log.notice("""
+                        depth \(String(format: "%.2f", depth), privacy: .public)s,                         underruns \(self.engine?.underruns ?? 0, privacy: .public),                         \(self.marginDescription(separation), privacy: .public)
+                        """)
+                }
+            }
+
+            self.updateGovernor(separation)
+
             // Trace where glitches land relative to loading and switching.
             if let engine = self.engine, !self.priming {
                 let n = engine.underruns
@@ -630,6 +929,10 @@ final class AudioController {
                         """)
                     self.lastUnderrunLog = n
                 }
+            }
+            if let target = self.mixTarget, separation.consumedCaptureFrames >= target {
+                self.mixTarget = nil
+                self.onChange?()
             }
             if let pending = self.pendingSemitones,
                separation.consumedCaptureFrames >= pending.target {
@@ -662,9 +965,13 @@ final class AudioController {
         capture?.stop(); capture = nil
         priming = false
         coasting = false
+        governorRatio = 1.0
+        targetDepth = 0
+        mixTarget = nil          // nothing is in flight once the pipeline is down
         modelLoader.releaseAfterGrace()   // keep it briefly in case they return
         pendingSemitones = nil   // next engage seeds engine.semitones directly
         engaged = false
+        recorder?.finish(worstStepSeconds: margin?.step); recorder = nil
         if wasEngaged {
             let rate = captureRateAtStop
             let cushionMs = margin.map { $0.frames == Int.max ? -1 : Int(Double($0.frames) / rate * 1000) } ?? -1

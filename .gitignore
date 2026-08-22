@@ -8,3 +8,7 @@
 
 # Converter output (large, produced on demand)
 tools/htdemucs-coreml/*.mlpackage/
+tools/.venv/
+tools/test-audio/
+tools/bench-results/
+tools/__pycache__/

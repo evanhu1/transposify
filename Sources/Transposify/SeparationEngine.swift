@@ -113,6 +113,46 @@ final class SeparationEngine {
     /// load and used from then on.
     static let assumedInferenceSeconds = 0.30
 
+    // MARK: - Measured worst step
+
+    /// The slowest whole step seen on this machine — inference plus the window
+    /// slide, the resampling and whatever the scheduler charged. Persisted,
+    /// because it is what the output ring has to be deep enough to cover, and
+    /// the ring is sized before a single step has run.
+    ///
+    /// The median is not the number that matters. A step at twice the median
+    /// empties a ring built for the median, and the render side then plays
+    /// silence it never gets back — the delay grows by exactly that silence and
+    /// stays grown. Sizing for the tail is what stops that ratchet.
+    private static let worstStepKey = "measuredWorstStepSeconds"
+
+    /// Clamped: one pathological step must not buy permanent latency.
+    static let maxWorstStep = 0.60
+
+    static var measuredWorstStep: Double? {
+        let v = UserDefaults.standard.double(forKey: worstStepKey)
+        return v > 0 ? min(v, maxWorstStep) : nil
+    }
+
+    /// Keep the high-water mark. Called as new maxima appear.
+    static func recordWorstStep(_ seconds: Double) {
+        guard SeparationModelLoader.persistMeasurements else { return }
+        guard seconds > 0, seconds <= maxWorstStep else { return }
+        guard seconds > (measuredWorstStep ?? 0) else { return }
+        UserDefaults.standard.set(seconds, forKey: worstStepKey)
+    }
+
+    /// Let the mark fade a little each time the pipeline starts, so one bad
+    /// session — a model loading under playback, a thermal dip — does not
+    /// charge every later session for it. A machine that really is that slow
+    /// re-establishes the number within seconds.
+    static func decayWorstStep() {
+        guard SeparationModelLoader.persistMeasurements else { return }
+        let v = UserDefaults.standard.double(forKey: worstStepKey)
+        guard v > 0 else { return }
+        UserDefaults.standard.set(v * 0.9, forKey: worstStepKey)
+    }
+
     static func recommendedHopSeconds(inferenceSeconds: Double?) -> Double {
         let inference = inferenceSeconds ?? assumedInferenceSeconds
         return min(maxHopSeconds, max(minHopSeconds, inference / dutyTarget))
@@ -137,6 +177,10 @@ final class SeparationEngine {
     private var emitFrames: Int { hopFrames + rampFrames }
 
     var hopSeconds: Double { Double(hopFrames) / Self.modelRate }
+
+    /// One hop in capture-rate frames, the unit the staged and published
+    /// counters are kept in.
+    var hopCaptureFrames: Int { Int(Double(hopFrames) * captureRate / Self.modelRate) }
 
     /// Added latency in seconds, excluding inference time.
     var nominalDelay: Double { Double(hopFrames + lookaheadFrames) / Self.modelRate }
@@ -174,6 +218,7 @@ final class SeparationEngine {
     private let finalDrainPending = Flag(false)
     private let stagedCounter = Counter()
     private let publishedCounter = Counter()
+    private let recording: SessionRecorder.StepSink?
 
     // Worker-thread state.
     private var stagingL: [Float] = []
@@ -183,6 +228,10 @@ final class SeparationEngine {
     private var carryR: [Float]
     private var emitL: [Float]
     private var emitR: [Float]
+    private var stepPredicted = false
+    /// How long the last step's prediction took, so the recorder can tell
+    /// model time from the window slide, the gather and the resampling.
+    private var lastPredictSeconds = 0.0
 
     /// How close the output ring came to running dry, and how long the
     /// slowest hop took. Together these say whether a mode switch has any
@@ -236,6 +285,10 @@ final class SeparationEngine {
     /// pipeline at this position.
     var stagedCaptureFrames: Int { stagedCounter.get() }
 
+    /// Capture-rate frames written to the output ring. Production stands here,
+    /// so this is the earliest position a change made now can reach.
+    var publishedCaptureFrames: Int { publishedCounter.get() }
+
     /// Capture-rate frames actually handed to the render side: published minus
     /// what still waits in the output ring. A boundary recorded at
     /// `stagedCaptureFrames` has been *heard* once this counter passes it.
@@ -260,11 +313,13 @@ final class SeparationEngine {
          model: MLModel?,
          hopSeconds: Double = SeparationEngine.defaultHopSeconds,
          lookaheadSeconds: Double = SeparationEngine.defaultLookaheadSeconds,
-         crossfadeSeconds: Double = 0.020) throws {
+         crossfadeSeconds: Double = 0.020,
+         recording: SessionRecorder.StepSink? = nil) throws {
         self.modelBox = Box(model)
         self.captureRate = captureRate
         self.channels = max(1, min(2, channels))
         self.inputRing = inputRing
+        self.recording = recording
 
         hopFrames = Int(hopSeconds * Self.modelRate)
         lookaheadFrames = Int(lookaheadSeconds * Self.modelRate)
@@ -354,11 +409,18 @@ final class SeparationEngine {
             """)
         while shouldRun.get() {
             drainInput()
+            let ringBefore = outputRing.availableToRead / channels
             let began = Date()
             let did = stepIfReady()
             if did {
                 let elapsed = -began.timeIntervalSinceNow
                 if elapsed > maxStepBox.get() { maxStepBox.set(elapsed) }
+                recording?.write(durationMs: elapsed * 1_000,
+                    predictMs: lastPredictSeconds * 1_000,
+                    ringBeforeFrames: ringBefore,
+                    ringAfterFrames: outputRing.availableToRead / channels,
+                    stagingFrames: stagingL.count, predicted: stepPredicted,
+                    stagedFrames: stagedCounter.get(), publishedFrames: publishedCounter.get())
             } else {
                 usleep(10_000)                      // 10 ms; one hop is ~0.3 s
             }
@@ -443,7 +505,7 @@ final class SeparationEngine {
         // Pace on output-ring room. While the render side is held (pause),
         // nothing drains; predicting anyway would overflow the ring and DROP
         // finished audio. Waiting keeps it safe in staging instead.
-        let neededRoom = (Int(Double(hopFrames) * captureRate / Self.modelRate) + 64) * channels
+        let neededRoom = (hopCaptureFrames + 64) * channels
         guard outputRing.availableToWrite >= neededRoom else { return false }
 
         slideWindow(by: needed)
@@ -456,12 +518,26 @@ final class SeparationEngine {
         // identical and a switch is inaudible apart from the crossfade.
         let selection = selectionBox.get()
         var separated: MLMultiArray?
-        if !selection.isPassthrough, modelBox.get() != nil {
-            guard let output = predict() else { return true }
-            separated = output
+        stepPredicted = !selection.isPassthrough && modelBox.get() != nil
+        lastPredictSeconds = 0
+        // One pool per step, so the prediction's output and Core ML's
+        // temporaries are freed here, on this thread, before the next step —
+        // not later, on top of it. Measured: a prediction that follows
+        // another closely costs 30–50 ms less this way. The GPU still wants
+        // idle time between predictions (sustained load lowers its clock),
+        // which is why the hop cannot shrink to the prediction time.
+        autoreleasepool {
+            if stepPredicted {
+                let began = Date()
+                if let output = predict() {
+                    lastPredictSeconds = -began.timeIntervalSinceNow
+                    separated = output
+                }
+            }
+            if stepPredicted && separated == nil { return }
+            buildEmitRegion(from: separated, selection: selection)
+            publish()
         }
-        buildEmitRegion(from: separated, selection: selection)
-        publish()
         return true
     }
 
@@ -483,6 +559,13 @@ final class SeparationEngine {
         }
     }
 
+    /// Run the model over the current window.
+    ///
+    /// Core ML allocates the ~8 MB output for every prediction. Handing it a
+    /// buffer to reuse (`outputBackings`) looks like the obvious saving, and
+    /// it was tried: on this GPU path it tripled the step, 108 ms to ~340 ms,
+    /// and the pipeline underran ninety times in a minute. The allocation is
+    /// the cheap part; forcing the GPU result into a CPU buffer is not.
     private func predict() -> MLMultiArray? {
         guard let model = modelBox.get() else { return nil }
         do {

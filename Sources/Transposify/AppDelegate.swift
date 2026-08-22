@@ -81,6 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         spotify.onChange = { [weak self] in
             DispatchQueue.main.async { self?.syncSpotifyToController() }
         }
+        controller.setSpotifyPlaying = { [weak self] playing in
+            self?.spotify.setPlaying(playing) ?? false
+        }
 
         requestMicrophoneThenStart()
         refreshUI()

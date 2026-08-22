@@ -40,8 +40,10 @@ final class AudioCapture {
     private let interleaveScratch: UnsafeMutablePointer<Float>
 
     private let spotifyBundleID = "com.spotify.client"
+    private let recorder: SessionRecorder?
 
-    init() {
+    init(recorder: SessionRecorder? = nil) {
+        self.recorder = recorder
         // Sized for the worst case (scratchFrameCapacity frames × up to 8 ch).
         interleaveScratch = .allocate(capacity: scratchFrameCapacity * 8)
     }
@@ -89,6 +91,7 @@ final class AudioCapture {
 
         // ~0.5s of slack absorbs clock drift between the tap and output device.
         ring = RingBuffer(capacityFloats: Int(sampleRate * 0.5) * channelCount)
+        try recorder?.prepareAudio(sampleRate: sampleRate, channels: channelCount)
 
         // 3. Wrap the tap in a private aggregate device so it delivers IO.
         let aggregateUID = "com.evanhu.transposify.aggregate-\(UUID().uuidString)"
@@ -115,12 +118,13 @@ final class AudioCapture {
         let scratch = interleaveScratch
         let scratchFrames = scratchFrameCapacity
         let channels = channelCount
+        let recording = recorder?.inputSink
         var newProc: AudioDeviceIOProcID?
         let procStatus = AudioDeviceCreateIOProcIDWithBlock(&newProc, aggregateID, nil) {
             _, inInputData, _, _, _ in
             AudioCapture.copyInput(
                 inInputData, ring: ring, scratch: scratch,
-                scratchFrames: scratchFrames, channels: channels)
+                scratchFrames: scratchFrames, channels: channels, recording: recording)
         }
         guard procStatus == noErr, let proc = newProc else {
             throw AudioCaptureError.ioProcFailed(procStatus)
@@ -158,7 +162,8 @@ final class AudioCapture {
         ring: RingBuffer,
         scratch: UnsafeMutablePointer<Float>,
         scratchFrames: Int,
-        channels: Int
+        channels: Int,
+        recording: SessionRecorder.InputSink?
     ) {
         let abl = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inInputData))
@@ -181,9 +186,11 @@ final class AudioCapture {
                     f += 1
                 }
                 ring.write(scratch, count: frames * 2)
+                recording?.write(scratch, count: frames * 2)
             } else {
                 // Already interleaved at the channel count we expect.
                 ring.write(ptr, count: totalFloats)
+                recording?.write(ptr, count: totalFloats)
             }
         } else {
             // Non-interleaved: one buffer per channel. Interleave into scratch.
@@ -200,6 +207,7 @@ final class AudioCapture {
                 }
             }
             ring.write(scratch, count: frames * channels)
+            recording?.write(scratch, count: frames * channels)
         }
     }
 

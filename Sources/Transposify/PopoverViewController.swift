@@ -403,21 +403,24 @@ final class PopoverViewController: NSViewController {
         } else if controller.preparingModel {
             trackLabel.stringValue = "Preparing separation\u{2026}"
             trackLabel.textColor = .labelColor
-            artistLabel.stringValue = "Loading the model, a few seconds"
+            artistLabel.stringValue = controller.pausedForModelLoad
+                ? "Paused while the model loads, a few seconds"
+                : "Loading the model, a few seconds"
             artistLabel.isHidden = false
             artistLabel.toolTip = nil
             trackLabel.toolTip = nil
         } else if spotify.isRunning, let track = spotify.current, !track.name.isEmpty {
             trackLabel.stringValue = track.name
             trackLabel.textColor = .labelColor
-            // The neural pipeline needs ~2 s of audio before its first output;
-            // without a hint that silence reads as "broken".
-            artistLabel.stringValue = controller.priming
-                ? "Catching up\u{2026}" : track.artist
+            // Every mix change takes seconds to reach the ears — the pipeline
+            // has to fill, and a change travels its whole delay. Without a
+            // hint, that wait reads as a click that did nothing.
+            artistLabel.stringValue = controller.catchingUp
+                ? "Loading\u{2026}" : track.artist
             artistLabel.isHidden = false
             // A long name truncates, so the tooltip is where the rest of it is.
             trackLabel.toolTip = track.name
-            artistLabel.toolTip = controller.priming ? nil : track.artist
+            artistLabel.toolTip = controller.catchingUp ? nil : track.artist
         } else {
             trackLabel.stringValue = spotify.isRunning ? "Nothing playing" : "Spotify not running"
             trackLabel.textColor = .labelColor
@@ -456,7 +459,11 @@ final class PopoverViewController: NSViewController {
         powerButton.toolTip = on
             ? "Transposing is on \u{2014} click to just listen"
             : "Transposing is off \u{2014} click to enable"
-        for row in inactiveWhenOff { row.alphaValue = on ? 1 : 0.4 }
+        // Catching up dims the same rows as Off, for the same reason: the
+        // controls are showing a mix the audio is not playing yet. The dim
+        // says "not in effect", so it belongs to both.
+        let inEffect = on && !controller.catchingUp
+        for row in inactiveWhenOff { row.alphaValue = inEffect ? 1 : 0.4 }
         for control in [slider, minusButton, plusButton, resetButton] as [NSControl] {
             control.isEnabled = on
         }

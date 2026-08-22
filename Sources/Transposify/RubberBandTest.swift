@@ -9,6 +9,9 @@ enum RubberBandTest {
         let err = FileHandle.standardError
         func emit(_ s: String) { err.write((s + "\n").data(using: .utf8)!) }
 
+        reportLatency(emit)
+        reportTimeRatio(emit)
+
         let sr = 48_000
         let semitones = 7.0
         let scale = pow(2.0, semitones / 12.0)
@@ -73,5 +76,70 @@ enum RubberBandTest {
         emit(String(format: "RBTEST: 440Hz +7st -> expected %.1fHz, measured %.1fHz (err %.2f%%, %d samples) -> %@",
                     expectedHz, measured, relErr * 100, output.count, pass ? "PASS" : "FAIL"))
         exit(pass ? 0 : 1)
+    }
+
+    /// The depth governor drives `rubberband_set_time_ratio` on a live stream,
+    /// so prove the R3 engine honours a ratio change in real-time mode: feed a
+    /// fixed number of samples and check the output is shorter by the ratio.
+    private static func reportTimeRatio(_ emit: (String) -> Void) {
+        let sr = 48_000
+        let realTime: Int32 = 0x0000_0001
+        let finer: Int32 = 0x2000_0000
+        let block = 1024
+        for ratio in [1.0, 0.985, 0.97] {
+            guard let rb = rubberband_new(UInt32(sr), 1, realTime | finer, 1.0, 1.0)
+            else { continue }
+            rubberband_set_max_process_size(rb, UInt32(block))
+            // Set it after creation, the way the render callback does.
+            rubberband_set_time_ratio(rb, ratio)
+            let inBuf = UnsafeMutablePointer<Float>.allocate(capacity: block)
+            let inPtrs = UnsafeMutablePointer<UnsafePointer<Float>?>.allocate(capacity: 1)
+            let outBuf = UnsafeMutablePointer<Float>.allocate(capacity: block)
+            let outPtrs = UnsafeMutablePointer<UnsafeMutablePointer<Float>?>.allocate(capacity: 1)
+            inPtrs[0] = UnsafePointer(inBuf); outPtrs[0] = outBuf
+            var phase = 0.0
+            let dphase = 2.0 * Double.pi * 440.0 / Double(sr)
+            var produced = 0, fed = 0
+            let total = sr * 4
+            while fed < total {
+                let n = min(block, total - fed)
+                for i in 0..<n { inBuf[i] = Float(sin(phase)); phase += dphase }
+                fed += n
+                rubberband_process(rb, UnsafePointer(inPtrs), UInt32(n), 0)
+                while rubberband_available(rb) > 0 {
+                    let want = min(block, Int(rubberband_available(rb)))
+                    produced += Int(rubberband_retrieve(rb, UnsafePointer(outPtrs), UInt32(want)))
+                }
+            }
+            rubberband_delete(rb)
+            inBuf.deallocate(); inPtrs.deallocate(); outBuf.deallocate(); outPtrs.deallocate()
+            let got = Double(produced) / Double(total)
+            emit(String(format: "RBRATIO: asked %.3f -> produced %.4f of input (%d of %d samples)",
+                        ratio, got, produced, total))
+        }
+    }
+
+    /// What the pitch shifter itself adds to the delay, per engine and shift.
+    /// It sits at the very end of the pipeline, so whatever it reports here is
+    /// added to every mode — including a shift of zero, where it buys nothing.
+    private static func reportLatency(_ emit: (String) -> Void) {
+        let sr: UInt32 = 48_000
+        let realTime: Int32 = 0x0000_0001
+        let finer: Int32 = 0x2000_0000        // R3
+        let hq: Int32 = 0x0200_0000
+        for (name, engine) in [("R3 finer", finer), ("R2 faster", Int32(0))] {
+            for semitones in [0, 4, 12] {
+                let scale = pow(2.0, Double(semitones) / 12.0)
+                guard let rb = rubberband_new(sr, 2, realTime | engine | hq, 1.0, scale)
+                else { continue }
+                let latency = rubberband_get_latency(rb)
+                let startDelay = rubberband_get_start_delay(rb)
+                rubberband_delete(rb)
+                let ms = Double(latency) / Double(sr) * 1000
+                emit("RBLATENCY: \(name)  \(semitones >= 0 ? "+" : "")\(semitones) st"
+                     + " -> latency \(latency) smp (\(String(format: "%.1f", ms)) ms),"
+                     + " start delay \(startDelay) smp")
+            }
+        }
     }
 }
