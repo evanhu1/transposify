@@ -131,8 +131,10 @@ apart once you have heard what follows. The benefit has a sharp knee.
 | ----------------------- | ---- | ------ | ----- | ----- | ----- |
 | quality (dB vs offline) | 19.3 | 20.5   | 22.0  | 23.2  | 24.2  |
 
-A quarter-second captures most of it. Beyond half a second it buys almost
-nothing.
+Beyond half a second it buys almost nothing, and below a quarter-second the
+curve is shallow: a 60 s run at 0.12 s scored within 0.5 dB of 0.25 s at the
+tenth percentile, and 0.06 s within 0.6 dB. The default is 0.12 s — 130 ms
+of delay for half a dB.
 
 **Delay** is the three added together, `hop + lookahead + inference`, plus a
 small output buffer.

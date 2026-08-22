@@ -91,9 +91,12 @@ final class SeparationEngine {
     static let windowFrames = 343_980          // 7.8 s at 44.1 kHz
     static let inputFeature = "audio"
     static let outputFeature = "sources"
-    /// Lookahead sits at the knee of the quality curve: a quarter-second buys
-    /// most of what future context is worth, and it costs delay but no GPU.
-    static let defaultLookaheadSeconds = 0.25
+    /// Lookahead costs delay but no GPU, and its quality curve is shallow at
+    /// the bottom: 0.25 s scored 20.5 dB against an offline reference, 0 s
+    /// scored 19.3, and a 60 s file run could not separate 0.12 from 0.25 by
+    /// more than half a dB at the tenth percentile. 0.12 s gives 130 ms of
+    /// delay back for that half a dB.
+    static let defaultLookaheadSeconds = 0.12
 
     /// Hop is the machine-dependent one. GPU duty is `inference / hop`, so a
     /// hop that is comfortable on fast hardware can exceed 100% duty on slow

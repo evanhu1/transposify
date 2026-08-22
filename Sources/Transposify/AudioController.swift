@@ -162,6 +162,10 @@ final class AudioController {
             self.adoptNewStemsIfAny()
             // Late arrival: the worker picks it up at the next hop boundary.
             self.separation?.setModel(self.modelLoader.model)
+            if self.modelLoader.model != nil, self.engaged {
+                self.stepsSettleAt = Date().addingTimeInterval(3)
+                self.stepsSettled = false
+            }
             self.applySelection()
             self.updateEngagement()
             self.onChange?()
@@ -267,8 +271,22 @@ final class AudioController {
         let worstStep = SeparationEngine.measuredWorstStep ?? (inference * 2.0)
         // The extra 50 ms is the wake-up that follows a late step; without it
         // the ring is exactly empty at the worst moment rather than nearly so.
-        return min(SeparationEngine.maxWorstStep + 0.05, max(0.15, worstStep + 0.05))
+        return max(0.15, min(worstStep, Self.cushionCap) + 0.05)
     }
+
+    /// The most step the cushion will cover. The governor gives back the time
+    /// an underrun inserts, so a step past this costs one short click and
+    /// nothing after it — whereas covering it costs every later session that
+    /// much delay. A single 520 ms step, seen once after a cold load, would
+    /// otherwise have bought 300 ms of permanent latency.
+    static let cushionCap = 0.35
+
+    /// When the worker's margins start to count. The first predictions after
+    /// a load follow the warm-up's back-to-back runs, which leave the GPU in
+    /// its slow state, and the first after an engage follow a burst of
+    /// catch-up steps. Neither describes the steady state the cushion is for.
+    private var stepsSettleAt: Date?
+    private var stepsSettled = false
 
     /// Ring occupancy that ends priming, in floats. Fixed at engage: it
     /// decides when playback starts, so it must not move underneath a
@@ -677,7 +695,7 @@ final class AudioController {
 
     private func updateModelLoadPause() {
         guard waitingForModel else {
-            if pausedForModelLoad { resumeAfterModelLoad() }
+            if pausedForModelLoad { scheduleResumeAfterModelLoad() }
             modelLoadPauseSpent = false
             return
         }
@@ -705,6 +723,23 @@ final class AudioController {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.modelLoadPauseLimit, execute: work)
     }
 
+    /// The warm-up ends with three back-to-back predictions, which leave the
+    /// GPU in its slow state; the first real predictions then take twice as
+    /// long and underrun. A short breath before playback lets it recover.
+    private var resumeGraceWork: DispatchWorkItem?
+    private func scheduleResumeAfterModelLoad() {
+        guard resumeGraceWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.resumeGraceWork = nil
+            guard self.pausedForModelLoad else { return }
+            self.resumeAfterModelLoad()
+            self.onChange?()
+        }
+        resumeGraceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
     /// Give the music back. Callers refresh the UI themselves.
     private func resumeAfterModelLoad() {
         clearModelLoadPause()
@@ -713,6 +748,8 @@ final class AudioController {
     }
 
     private func clearModelLoadPause() {
+        resumeGraceWork?.cancel()
+        resumeGraceWork = nil
         resumeWork?.cancel()
         resumeWork = nil
         pausedForModelLoad = false
@@ -774,6 +811,8 @@ final class AudioController {
             let sourceRing = separation.outputRing
             priming = true
             depthTicks = 0
+            stepsSettleAt = Date().addingTimeInterval(3)
+            stepsSettled = false
             let cushion = cushionSeconds
             primeFloats = Int((cushion + separation.hopSeconds) * capture.sampleRate)
                 * capture.channelCount
@@ -890,9 +929,17 @@ final class AudioController {
                 separation.resetMargins()
                 self.onChange?()
             }
-            // Keep the high-water mark that sizes the next cushion. Only new
-            // maxima write, so this is a handful of writes per session.
-            SeparationEngine.recordWorstStep(separation.maxStepSeconds)
+            // Keep the high-water mark that sizes the next cushion, once the
+            // worker has settled. Only new maxima write, so this is a handful
+            // of writes per session.
+            if let at = self.stepsSettleAt, Date() >= at {
+                self.stepsSettleAt = nil
+                self.stepsSettled = true
+                separation.resetMargins()
+            }
+            if self.stepsSettled {
+                SeparationEngine.recordWorstStep(separation.maxStepSeconds)
+            }
 
             let rate = self.capture?.sampleRate ?? 48_000
             let staged = separation.stagedCaptureFrames
