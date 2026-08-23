@@ -103,6 +103,9 @@ final class PopoverViewController: NSViewController {
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
     private var modelRow: NSStackView!
+    /// One text button above the mix controls: the reason they are greyed
+    /// out and the way to fix it, in the same place.
+    private let downloadButton = NSButton()
     private let rememberSwitch = NSSwitch()
     private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
@@ -301,14 +304,24 @@ final class PopoverViewController: NSViewController {
         grid.distribution = .fill
         stemGrid = grid
 
-        let mixStack = NSStackView(views: [mixTitle, chipRow, grid])
+        downloadButton.isBordered = false
+        downloadButton.focusRingType = .none
+        downloadButton.font = .systemFont(ofSize: 12, weight: .medium)
+        downloadButton.contentTintColor = transposeAccent
+        downloadButton.alignment = .left
+        downloadButton.target = self
+        downloadButton.action = #selector(modelButtonTapped)
+        downloadButton.toolTip = "A \(SeparationModel.downloadSizeDescription) download, once. "
+            + "Separation then runs on your Mac; the file is verified against a checksum."
+
+        let mixStack = NSStackView(views: [mixTitle, downloadButton, chipRow, grid])
         mixStack.orientation = .vertical
         mixStack.alignment = .leading
         mixStack.spacing = 8
         mixStack.setCustomSpacing(10, after: chipRow)
         let karaokeRow: NSView = mixStack
 
-        // Notice row: model download prompt, or the Automation hint.
+        // Notice row: the Automation hint.
         modelLabel.font = .systemFont(ofSize: 11)
         modelLabel.textColor = .secondaryLabelColor
         modelLabel.lineBreakMode = .byTruncatingTail
@@ -587,52 +600,47 @@ final class PopoverViewController: NSViewController {
     /// a greyed-out segment with no explanation.
     private func refreshModelRow() {
         let installer = controller.modelInstaller
+        // The download lives above the mix controls it unlocks; the button's
+        // title is the whole status, so there is nothing else to read.
+        var title = ""
+        var enabled = true
+        var tint = transposeAccent
         switch installer.state {
         case .downloading(let fraction, let received, let total):
-            modelRow.isHidden = false
             let mb = { (b: Int64) in String(format: "%.0f", Double(b) / 1_000_000) }
-            modelLabel.stringValue =
-                "Downloading model \u{2014} \(mb(received)) of \(mb(total)) MB"
-            modelLabel.textColor = .secondaryLabelColor
-            modelButton.title = "\(Int(fraction * 100))%  Cancel"
+            title = "Downloading \(mb(received)) of \(mb(total)) MB (\(Int(fraction * 100))%) \u{2014} Cancel"
         case .verifying:
-            modelRow.isHidden = false
-            modelLabel.stringValue = "Checking the download\u{2026}"
-            modelLabel.textColor = .secondaryLabelColor
-            modelButton.title = ""
+            title = "Checking the download\u{2026}"
+            enabled = false
         case .installing:
-            modelRow.isHidden = false
-            modelLabel.stringValue = "Installing the model\u{2026}"
-            modelLabel.textColor = .secondaryLabelColor
-            modelButton.title = ""
+            title = "Installing the model\u{2026}"
+            enabled = false
         case .failed(let message):
-            modelRow.isHidden = false
-            modelLabel.stringValue = message
-            modelLabel.textColor = .systemRed
-            modelButton.title = "Retry"
+            title = "\(message) \u{2014} Retry"
+            tint = .systemRed
         case .idle, .installed:
-            modelLabel.textColor = .secondaryLabelColor
             if !SeparationModel.isInstalled {
-                modelRow.isHidden = false
-                modelLabel.stringValue =
-                    "Isolating needs a \(SeparationModel.downloadSizeDescription) model"
-                modelButton.title = "Download"
-            } else if spotify.automation == .denied {
-                // Model is fine, so the row is free for the next useful thing.
-                modelRow.isHidden = false
-                modelLabel.stringValue = "Album art needs Automation access"
-                modelButton.title = "Open Settings"
-            } else {
-                modelRow.isHidden = true
-                modelButton.title = ""
+                title = "Download Mix model"
             }
         }
+        downloadButton.title = title
+        downloadButton.isHidden = title.isEmpty
+        downloadButton.isEnabled = enabled
+        downloadButton.contentTintColor = tint
+
+        // The notice row is for the Automation hint alone now.
+        if SeparationModel.isInstalled, spotify.automation == .denied {
+            modelRow.isHidden = false
+            modelLabel.stringValue = "Album art needs Automation access"
+            modelLabel.textColor = .secondaryLabelColor
+            modelButton.title = "Open Settings"
+        } else {
+            modelRow.isHidden = true
+            modelButton.title = ""
+        }
         modelButton.isHidden = modelButton.title.isEmpty
-        modelLabel.toolTip = SeparationModel.isInstalled
-            ? "System Settings \u{25B8} Privacy & Security \u{25B8} Automation "
-                + "\u{25B8} Transposify \u{25B8} Spotify"
-            : "Neural separation runs on your Mac; the model is downloaded once "
-                + "and verified against a checksum."
+        modelLabel.toolTip = "System Settings \u{25B8} Privacy & Security \u{25B8} Automation "
+            + "\u{25B8} Transposify \u{25B8} Spotify"
     }
 
     @objc private func modelButtonTapped() {

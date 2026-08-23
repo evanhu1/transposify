@@ -81,8 +81,8 @@ permissions. The script removes all of them.
 everything else) and plays back only the ones you keep. Drop the vocal to sing
 lead, or keep vocal and drums to learn a part. It runs live, on your Mac.
 
-It needs a one-time model download. Open the popover and click **Download** next
-to "Isolating needs a 118 MB model". The model lands in
+It needs a one-time model download. Open the popover and click **Download Mix
+model**, above the mix controls. The model lands in
 `~/Library/Application Support/Transposify/` and is checked against a SHA-256
 built into the app, so a corrupted or substituted file is refused. Until it is
 there, every mix except **All** stays greyed out.
