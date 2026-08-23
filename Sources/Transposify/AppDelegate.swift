@@ -199,12 +199,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var resignObserver: NSObjectProtocol?
     private var popoverShownAt = Date.distantPast
 
+    /// Processes whose windows are system prompts — permission consent,
+    /// password entry — rather than the user going somewhere else. The
+    /// popover stays open while one of these is in front, so answering
+    /// "Allow" to the System Audio Recording or Automation prompt lands
+    /// the user back where they were.
+    private static let systemPromptBundleIDs: Set<String> = [
+        "com.apple.UserNotificationCenter",
+        "com.apple.SecurityAgent",
+        "com.apple.coreservices.uiagent",
+    ]
+
+    private var systemPromptIsFrontmost: Bool {
+        guard let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
+        return Self.systemPromptBundleIDs.contains(id)
+    }
+
     private func beginDismissWatch() {
         popoverShownAt = Date()
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] _ in
-            self?.popover.performClose(nil)
+            guard let self, !self.systemPromptIsFrontmost else { return }
+            self.popover.performClose(nil)
         }
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53, let self, self.popover.isShown else { return event }
@@ -216,8 +233,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         ) { [weak self] _ in
             guard let self else { return }
             // A focus wobble while the popover is still appearing is not the
-            // user leaving; a switch a second or more later is.
-            if Date().timeIntervalSince(self.popoverShownAt) > 1.0 {
+            // user leaving, and neither is a system prompt taking the front;
+            // a switch to another app a second or more later is.
+            if Date().timeIntervalSince(self.popoverShownAt) > 1.0,
+               !self.systemPromptIsFrontmost {
                 self.popover.performClose(nil)
             }
         }
