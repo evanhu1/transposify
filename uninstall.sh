@@ -73,17 +73,15 @@ tccutil reset AudioCapture "$BUNDLE_ID" >/dev/null 2>&1 || true
 tccutil reset Microphone "$BUNDLE_ID" >/dev/null 2>&1 || true
 tccutil reset AppleEvents "$BUNDLE_ID" >/dev/null 2>&1 || true
 
-# The login-item table is macOS's, and only the app could edit its own row.
-if sfltool dumpbtm 2>/dev/null | grep -q "Bundle Identifier: $BUNDLE_ID"; then
-    cat <<EOF
+# The login-item table is macOS's and only the app can edit its own row, and
+# reading it (sfltool dumpbtm) needs an administrator password, so this does
+# not check. If the app ever launched at login, one look is enough.
+cat <<EOF
 
-    One thing is left: a "Transposify" row in
-    System Settings ▸ General ▸ Login Items & Extensions.
-    macOS keys that table by code signature. The row belongs to a copy that
-    was deleted before it could remove itself, or to an earlier build (each
-    ad-hoc build signs differently). Remove it there with the "−" button.
+    If System Settings ▸ General ▸ Login Items & Extensions still shows a
+    "Transposify" row, remove it there with the "−" button. macOS keys that
+    table by code signature, so a row can outlive the copy that made it.
 EOF
-fi
 
 echo
 echo "✓ Transposify is uninstalled."
