@@ -71,7 +71,7 @@ enum SeparationModel {
     /// different digests. This must be the hash of the file actually attached
     /// to the release, not of a later rebuild.
     static let expectedArchiveSHA256 =
-        "d7970250d670bc4bb08ab92cdb0f74d0600d913d4e5163d967d4efd951b2d2a2"
+        "1c5900ef65527fc5f323828b6d81c8ef3b59adc846de34c65a75143222a6b3ff"
 
     static let approximateDownloadBytes = 110_996_483
 
