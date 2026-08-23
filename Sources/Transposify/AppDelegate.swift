@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 import CoreText
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let spotify = SpotifyState()
     private let controller = AudioController()
     private let popover = NSPopover()
@@ -73,7 +73,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.popoverVC.refresh() }
         }
         popover.contentViewController = popoverVC
-        popover.behavior = .transient
+        // Not `.transient`: that closes on any loss of focus, and opening the
+        // popover pokes Spotify over Apple Events, which can bring Spotify
+        // forward for a moment — the popover then vanished as it appeared.
+        // Dismissal is handled here instead: a click anywhere outside, Esc,
+        // or a real switch to another app (not one in the first second).
+        popover.behavior = .applicationDefined
+        popover.delegate = self
 
         controller.onChange = { [weak self] in
             DispatchQueue.main.async { self?.refreshUI() }
@@ -172,12 +178,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            spotify.refreshNowPlaying()
+            // Playback notifications keep now-playing current; the Apple
+            // Events query is only for the first look, and for recovering
+            // once Automation is granted after the fact.
+            if spotify.current == nil || spotify.automation != .granted {
+                spotify.refreshNowPlaying()
+            }
             if let id = spotify.current?.id { artwork.request(trackID: id) }
             popoverVC.refresh()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
+            beginDismissWatch()
         }
+    }
+
+    // MARK: - Popover dismissal
+
+    private var outsideClickMonitor: Any?
+    private var escapeMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private var popoverShownAt = Date.distantPast
+
+    private func beginDismissWatch() {
+        popoverShownAt = Date()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            self?.popover.performClose(nil)
+        }
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53, let self, self.popover.isShown else { return event }
+            self.popover.performClose(nil)
+            return nil
+        }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            // A focus wobble while the popover is still appearing is not the
+            // user leaving; a switch a second or more later is.
+            if Date().timeIntervalSince(self.popoverShownAt) > 1.0 {
+                self.popover.performClose(nil)
+            }
+        }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        if let m = outsideClickMonitor { NSEvent.removeMonitor(m); outsideClickMonitor = nil }
+        if let m = escapeMonitor { NSEvent.removeMonitor(m); escapeMonitor = nil }
+        if let o = resignObserver { NotificationCenter.default.removeObserver(o); resignObserver = nil }
     }
 
     private func refreshUI() {
