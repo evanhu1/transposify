@@ -418,8 +418,23 @@ final class PopoverViewController: NSViewController {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
         nowRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
-        artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
+        // Fill the row when there is room, so a long title truncates at the
+        // row's edge rather than at its own natural width...
+        for v in [titleRow, trackLabel, artistLabel] as [NSView] {
+            let fill = v.widthAnchor.constraint(equalTo: nowRow.widthAnchor)
+            fill.priority = .defaultHigh
+            fill.isActive = true
+        }
+        // ...but never past the power button, whatever width the stack works
+        // out for the row. This is the constraint that actually holds the
+        // header together: the labels' compression resistance is low, so the
+        // only way to satisfy it is to truncate. Without it the row's width
+        // is the stack's business, and a title long enough to overrun it drew
+        // straight over the button and off the popover.
+        for label in [trackLabel, artistLabel] {
+            label.trailingAnchor.constraint(lessThanOrEqualTo: powerButton.leadingAnchor,
+                                            constant: -8).isActive = true
+        }
         artwork.onChange = { [weak self] in self?.refresh() }
         inactiveWhenOff = [header, sliderRow, karaokeRow, rememberRow]
         view = container

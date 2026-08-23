@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
 
+
         if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_GALLERY"] {
             DesignGallery.run(to: path)
             return
@@ -337,7 +338,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Debug-only: render the popover to a PNG (dark appearance) and exit.
     private func snapshotPopover(to path: String) {
         controller.testHooks = (engage: { _, _ in }, disengage: { })
-        spotify.injectSnapshotTrack(name: "Human Nature", artist: "Michael Jackson")
+        // Overridable so a long title can be checked against the header's width.
+        let env = ProcessInfo.processInfo.environment
+        spotify.injectSnapshotTrack(
+            name: env["TRANSPOSIFY_SNAPSHOT_TITLE"] ?? "Human Nature",
+            artist: env["TRANSPOSIFY_SNAPSHOT_ARTIST"] ?? "Michael Jackson")
         controller.spotifyUpdate(running: true, playing: true, trackID: "snapshot")
         controller.setSemitones(2)
 
