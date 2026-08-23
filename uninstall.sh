@@ -79,8 +79,9 @@ if sfltool dumpbtm 2>/dev/null | grep -q "Bundle Identifier: $BUNDLE_ID"; then
 
     One thing is left: a "Transposify" row in
     System Settings ▸ General ▸ Login Items & Extensions.
-    The app was deleted before it could remove its own entry, so macOS keeps
-    a dead one. Remove it there with the "−" button.
+    macOS keys that table by code signature. The row belongs to a copy that
+    was deleted before it could remove itself, or to an earlier build (each
+    ad-hoc build signs differently). Remove it there with the "−" button.
 EOF
 fi
 
