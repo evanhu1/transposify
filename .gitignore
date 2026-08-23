@@ -12,3 +12,6 @@ tools/.venv/
 tools/test-audio/
 tools/bench-results/
 tools/__pycache__/
+
+# Release DMGs
+/dist/

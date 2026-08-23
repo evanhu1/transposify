@@ -23,7 +23,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Transposify reads Spotify's now-playing track and album art. It never controls playback.</string>
+	<string>Transposify reads Spotify's now-playing track and album art, and pauses Spotify for a few seconds while its vocal-removal model loads.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Transposify captures Spotify's audio so it can pitch-shift it in real time.</string>
 	<key>NSHighResolutionCapable</key>

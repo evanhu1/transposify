@@ -11,6 +11,17 @@ https://github.com/user-attachments/assets/f7157fe1-7879-4905-acac-966362948482
 
 ## Install
 
+**Download:** get `Transposify-<version>.dmg` from the
+[latest release](https://github.com/evanhu1/transposify/releases/latest), open
+it, and drag Transposify to Applications. The first launch needs one extra
+step, because the app is not signed with an Apple Developer ID: macOS will say
+it "could not verify" the app. Open **System Settings ▸ Privacy & Security**,
+scroll down, and click **Open Anyway** next to Transposify. That is a one-time
+decision; after it the app opens normally.
+
+**Or build it yourself**, which needs no such step since macOS does not
+quarantine locally built apps:
+
 ```sh
 git clone https://github.com/evanhu1/transposify.git
 cd transposify
@@ -253,6 +264,8 @@ faithful to live playback. `tools/bench.sh <in.wav> [--secs N]` runs the standar
 configuration sweep.
 
 To build without installing: `./make-app.sh && open Transposify.app`.
+To build the release DMG: `./make-dmg.sh` (see the script for signing and
+notarizing with a Developer ID).
 
 ## License
 
