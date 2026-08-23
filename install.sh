@@ -62,5 +62,5 @@ On first launch macOS asks for Microphone access — that's the permission Core
 Audio uses to capture Spotify's audio; it never touches your real mic. Click
 Allow, then look for the 𝄞 in your menu bar.
 
-Uninstall:  rm -rf "$DEST/$APP" && tccutil reset Microphone $BUNDLE_ID
+Uninstall:  ./uninstall.sh   (app, model, settings, caches, permissions)
 EOF

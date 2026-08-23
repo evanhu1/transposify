@@ -39,8 +39,13 @@ command-line tools (`xcode-select --install` if `swift` isn't found).
 **Uninstall:**
 
 ```sh
-rm -rf /Applications/Transposify.app && tccutil reset Microphone com.evanhu.transposify
+./uninstall.sh                  # app, model, settings, caches, permissions
+./uninstall.sh --keep-settings  # same, but keep your per-song transposes
 ```
+
+The app lives in more places than `/Applications`: the model in Application
+Support, preferences, caches, a launch-at-login entry, and two privacy
+permissions. The script removes all of them.
 
 ## Stem separation
 

@@ -1,6 +1,11 @@
 import AppKit
 
 // Headless checks; never run in normal use.
+if ProcessInfo.processInfo.environment["TRANSPOSIFY_UNREGISTER_LOGIN"] == "1" {
+    // uninstall.sh: only the app can remove its own launch-at-login entry.
+    LoginItem.set(false)
+    exit(0)
+}
 if let spec = ProcessInfo.processInfo.environment["TRANSPOSIFY_SIMULATE"] {
     PacedSimulator.run(spec)
 }
