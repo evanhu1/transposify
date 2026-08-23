@@ -54,8 +54,9 @@ private final class Counter: @unchecked Sendable {
 /// Two facts shape the design:
 ///
 /// 1. HTDemucs is a 44.1 kHz model, but the process tap runs at the output
-///    device's rate (48 kHz here), so the worker resamples both ways. Measured
-///    cost of that round trip is ~55 dB SNR — far below the separation error.
+///    device's rate (48 kHz here), so the worker resamples both ways, with
+///    its own `Resampler`. Measured cost of that round trip is 84 dB SNR —
+///    far below the separation error.
 /// 2. Emitting a hop needs `lookahead` seconds of *future* context, so output
 ///    trails input by `hop + lookahead + inference` — ~0.6 s at the defaults.
 ///    Separation cannot be done with less, and because switching modes has to
@@ -233,17 +234,19 @@ final class SeparationEngine {
     private let inputArray: MLMultiArray
     private let featureProvider: MLDictionaryFeatureProvider
 
-    private let captureFormat: AVAudioFormat
-    private let modelFormat: AVAudioFormat
-    private let downConverter: AVAudioConverter
-    private let upConverter: AVAudioConverter
+    // One resampler per channel and direction; see `Resampler` for why the
+    // system converter is not used here.
+    private let downL: Resampler
+    private let downR: Resampler
+    private let upL: Resampler
+    private let upR: Resampler
 
     // Preallocated conversion buffers; the worker reuses them every step.
-    private let downInBuf: AVAudioPCMBuffer
-    private let downOutBuf: AVAudioPCMBuffer
-    private let upInBuf: AVAudioPCMBuffer
-    private let upOutBuf: AVAudioPCMBuffer
+    private let readFrames: Int             // capture frames per drain pass
     private var interleaveScratch: [Float]
+    private var planeScratch: [Float]
+    private var outL: [Float] = []
+    private var outR: [Float] = []
 
     private let ramp: [Float]              // raised cosine, `rampFrames` long
 
@@ -394,34 +397,18 @@ final class SeparationEngine {
         featureProvider = try MLDictionaryFeatureProvider(
             dictionary: [Self.inputFeature: inputArray])
 
-        guard let capFmt = AVAudioFormat(standardFormatWithSampleRate: captureRate,
-                                         channels: AVAudioChannelCount(self.channels)),
-              let mdlFmt = AVAudioFormat(standardFormatWithSampleRate: Self.modelRate,
-                                         channels: 2),
-              let down = AVAudioConverter(from: capFmt, to: mdlFmt),
-              let up = AVAudioConverter(from: mdlFmt, to: capFmt)
-        else { throw StartError.converterUnavailable }
-        captureFormat = capFmt
-        modelFormat = mdlFmt
-        downConverter = down
-        upConverter = up
-        for converter in [down, up] {
-            converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
-        }
+        downL = Resampler(inRate: captureRate, outRate: Self.modelRate)
+        downR = Resampler(inRate: captureRate, outRate: Self.modelRate)
+        upL = Resampler(inRate: Self.modelRate, outRate: captureRate)
+        upR = Resampler(inRate: Self.modelRate, outRate: captureRate)
 
-        // Capacities: the capture ring holds at most ~1.5 s, and one publish is
-        // one hop. Both get generous headroom because they are allocated once.
-        let inCap = AVAudioFrameCount(captureRate * 2.0)
-        let downCap = AVAudioFrameCount(Self.modelRate * 2.0) + 1024
-        let upInCap = AVAudioFrameCount(hopFrames)
-        let upOutCap = AVAudioFrameCount(Double(hopFrames) * captureRate / Self.modelRate) + 1024
-        guard let a = AVAudioPCMBuffer(pcmFormat: capFmt, frameCapacity: inCap),
-              let b = AVAudioPCMBuffer(pcmFormat: mdlFmt, frameCapacity: downCap),
-              let c = AVAudioPCMBuffer(pcmFormat: mdlFmt, frameCapacity: upInCap),
-              let d = AVAudioPCMBuffer(pcmFormat: capFmt, frameCapacity: upOutCap)
-        else { throw StartError.converterUnavailable }
-        downInBuf = a; downOutBuf = b; upInBuf = c; upOutBuf = d
-        interleaveScratch = [Float](repeating: 0, count: Int(inCap) * self.channels)
+        // One drain pass takes at most this much; the capture ring holds
+        // ~0.5 s, so this is never the limit.
+        readFrames = Int(captureRate * 2.0)
+        interleaveScratch = [Float](repeating: 0, count: readFrames * self.channels)
+        planeScratch = [Float](repeating: 0, count: readFrames)
+        outL.reserveCapacity(Int(captureRate))
+        outR.reserveCapacity(Int(captureRate))
 
         let n = 2 * crossfadeFrames
         ramp = (0..<n).map { 0.5 - 0.5 * cos(Float.pi * Float($0) / Float(n - 1)) }
@@ -496,8 +483,8 @@ final class SeparationEngine {
     private func drainInput() {
         let available = inputRing.availableToRead
         guard available >= channels else { return }
-        let wantFrames = min(available / channels, Int(downInBuf.frameCapacity))
-        guard wantFrames > 0, let inChannels = downInBuf.floatChannelData else { return }
+        let wantFrames = min(available / channels, readFrames)
+        guard wantFrames > 0 else { return }
 
         let got = interleaveScratch.withUnsafeMutableBufferPointer {
             inputRing.read(into: $0.baseAddress!, count: wantFrames * channels)
@@ -518,33 +505,20 @@ final class SeparationEngine {
             finalDrainPending.set(false)
         }
         stagedCounter.add(frames)
-        downInBuf.frameLength = AVAudioFrameCount(frames)
-        for c in 0..<channels {
-            let dst = inChannels[c]
-            var f = 0
-            while f < frames { dst[f] = interleaveScratch[f * channels + c]; f += 1 }
+        // De-interleave one channel at a time and resample it straight into
+        // staging. A mono capture feeds both planes.
+        for c in 0..<2 {
+            let source = min(c, channels - 1)
+            planeScratch.withUnsafeMutableBufferPointer { plane in
+                var f = 0
+                while f < frames { plane[f] = interleaveScratch[f * channels + source]; f += 1 }
+                if c == 0 {
+                    downL.process(plane.baseAddress!, count: frames, into: &stagingL)
+                } else {
+                    downR.process(plane.baseAddress!, count: frames, into: &stagingR)
+                }
+            }
         }
-
-        downOutBuf.frameLength = 0
-        var supplied = false
-        var error: NSError?
-        let status = downConverter.convert(to: downOutBuf, error: &error) { _, outStatus in
-            if supplied { outStatus.pointee = .noDataNow; return nil }
-            supplied = true
-            outStatus.pointee = .haveData
-            return self.downInBuf
-        }
-        guard status != .error, downOutBuf.frameLength > 0,
-              let outChannels = downOutBuf.floatChannelData else {
-            if let error { log.error("downsample failed: \(error, privacy: .public)") }
-            return
-        }
-
-        let n = Int(downOutBuf.frameLength)
-        let left = outChannels[0]
-        let right = outChannels[downOutBuf.format.channelCount > 1 ? 1 : 0]
-        stagingL.append(contentsOf: UnsafeBufferPointer(start: left, count: n))
-        stagingR.append(contentsOf: UnsafeBufferPointer(start: right, count: n))
     }
 
     /// If enough new audio has arrived, slide the window, predict, and emit.
@@ -708,42 +682,28 @@ final class SeparationEngine {
 
     /// Resample one hop back to the capture rate and write it to the output ring.
     private func publish() {
-        guard let inChannels = upInBuf.floatChannelData else { return }
-        upInBuf.frameLength = AVAudioFrameCount(hopFrames)
-        emitL.withUnsafeBufferPointer { l in
-            inChannels[0].update(from: l.baseAddress!, count: hopFrames)
-        }
-        if upInBuf.format.channelCount > 1 {
-            emitR.withUnsafeBufferPointer { r in
-                inChannels[1].update(from: r.baseAddress!, count: hopFrames)
-            }
-        }
-
-        upOutBuf.frameLength = 0
-        var supplied = false
-        var error: NSError?
-        let status = upConverter.convert(to: upOutBuf, error: &error) { _, outStatus in
-            if supplied { outStatus.pointee = .noDataNow; return nil }
-            supplied = true
-            outStatus.pointee = .haveData
-            return self.upInBuf
-        }
-        guard status != .error, upOutBuf.frameLength > 0,
-              let outChannels = upOutBuf.floatChannelData else {
-            if let error { log.error("upsample failed: \(error, privacy: .public)") }
-            return
-        }
-
-        let n = Int(upOutBuf.frameLength)
+        outL.removeAll(keepingCapacity: true)
+        outR.removeAll(keepingCapacity: true)
+        emitL.withUnsafeBufferPointer { upL.process($0.baseAddress!, count: hopFrames, into: &outL) }
+        emitR.withUnsafeBufferPointer { upR.process($0.baseAddress!, count: hopFrames, into: &outR) }
+        // Both resamplers advance by the same step, so the counts agree; the
+        // minimum is only a guard.
+        let n = min(outL.count, outR.count)
+        guard n > 0 else { return }
         let count = n * channels
         if interleaveScratch.count < count {
             interleaveScratch = [Float](repeating: 0, count: count)
         }
         interleaveScratch.withUnsafeMutableBufferPointer { dst in
-            for c in 0..<channels {
-                let src = outChannels[min(c, Int(upOutBuf.format.channelCount) - 1)]
-                var f = 0
-                while f < n { dst[f * channels + c] = src[f]; f += 1 }
+            var f = 0
+            if channels == 1 {
+                while f < n { dst[f] = outL[f]; f += 1 }
+            } else {
+                while f < n {
+                    dst[f * channels] = outL[f]
+                    dst[f * channels + 1] = outR[f]
+                    f += 1
+                }
             }
             outputRing.write(dst.baseAddress!, count: count)
         }
