@@ -11,16 +11,36 @@ https://github.com/user-attachments/assets/f7157fe1-7879-4905-acac-966362948482
 
 ## Install
 
-**Download:** get `Transposify-<version>.dmg` from the
-[latest release](https://github.com/evanhu1/transposify/releases/latest), open
-it, and drag Transposify to Applications. The first launch needs one extra
-step, because the app is not signed with an Apple Developer ID: macOS will say
-it "could not verify" the app. Open **System Settings ▸ Privacy & Security**,
-scroll down, and click **Open Anyway** next to Transposify. That is a one-time
-decision; after it the app opens normally.
+Two ways. The download is quicker; building from source skips one security
+prompt. Either way the app is the same.
 
-**Or build it yourself**, which needs no such step since macOS does not
-quarantine locally built apps:
+### Option 1: download the app
+
+1. Download `Transposify-<version>.dmg` from the
+   [latest release](https://github.com/evanhu1/transposify/releases/latest).
+2. Open the `.dmg` and drag **Transposify** onto the **Applications** folder
+   beside it.
+3. Open Transposify from Applications. macOS will refuse the first time:
+   *"Transposify" Not Opened — Apple could not verify…* Click **Done**.
+4. Open **System Settings ▸ Privacy & Security**, scroll to the bottom of the
+   page, and click **Open Anyway** next to the Transposify message. Confirm
+   with your password or Touch ID.
+
+   This happens because the app is not signed with an Apple Developer ID,
+   so macOS cannot check it. It is a one-time decision; after it the app
+   opens like any other.
+5. Look for the `𝄞` in your menu bar. macOS asks for two permissions on first
+   use. **Microphone** is what Core Audio uses to capture Spotify's audio —
+   it never touches your real microphone. **Automation** (controlling
+   Spotify) is for reading the current track and pausing Spotify for a few
+   seconds while the model loads. Allow both.
+6. To remove vocals or isolate stems, click **Download** in the popover. It
+   fetches the separation model (118 MB) once and verifies it.
+
+**Updating:** download the new `.dmg` and drag the app over the old one. Your
+settings, per-song transposes and the model stay where they are.
+
+### Option 2: build from source
 
 ```sh
 git clone https://github.com/evanhu1/transposify.git
@@ -29,13 +49,10 @@ cd transposify
 ```
 
 That builds the app, ad-hoc-signs it, installs it to `/Applications`, and
-launches it. On first launch macOS asks for **Microphone** access. That is the
-permission Core Audio uses to capture Spotify's audio; it never touches your
-real microphone. Click **Allow**, then look for the `𝄞` in your menu bar.
+launches it. macOS does not quarantine apps built on the Mac they run on, so
+step 4 above does not apply. The permission prompts in step 5 do.
 
-### Updating
-
-From the same clone used for the original install:
+**Updating:** from the same clone used for the original install:
 
 ```sh
 cd /path/to/transposify
