@@ -11,8 +11,7 @@ https://github.com/user-attachments/assets/f7157fe1-7879-4905-acac-966362948482
 
 ## Install
 
-Two ways. The download is quicker; building from source skips one security
-prompt. Either way the app is the same.
+Downloading the app (option 1) is quicker but it's unsigned so you'll need to tell MacOS it's safe. Building from source (option 2) skips this.
 
 ### Option 1: download the app
 
