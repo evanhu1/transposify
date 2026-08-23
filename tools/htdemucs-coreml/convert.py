@@ -572,7 +572,16 @@ def main() -> None:
     print(f"\n[1/5] Loading Demucs '{MODEL_NAME}' ...")
     from demucs.pretrained import get_model
     bag = get_model(MODEL_NAME)
-    model = bag.models[0]
+    # A "bag" can hold several models. htdemucs_ft holds four, each fine-tuned
+    # for one source in demucs order (drums, bass, other, vocals) though each
+    # still outputs all four. Index 3 is therefore the one to pick when what
+    # matters is how cleanly vocals are told apart from everything else.
+    index = int(os.environ.get("HTDEMUCS_BAG_INDEX", "0"))
+    if index >= len(bag.models):
+        raise SystemExit(f"{MODEL_NAME} has {len(bag.models)} model(s); index {index} is out of range")
+    model = bag.models[index]
+    if len(bag.models) > 1:
+        print(f"       bag of {len(bag.models)}; using index {index}")
     model.eval()
     model.use_train_segment = False
     num_params = sum(p.numel() for p in model.parameters()) / 1e6
