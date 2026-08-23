@@ -9,20 +9,22 @@
 # This is an experiment, not a mode of the app: nothing here is persisted and
 # quitting the app returns you to the installed defaults. Ctrl-C also quits it.
 #
-# Five things are traded for quality, largest effect first:
+# Four things are traded for quality, largest effect first. The model itself
+# is deliberately unchanged: same six-stem htdemucs_6s, same stems, same
+# tiles — only how it is converted and driven differs from the shipping build.
 #
-#   1. Model. The shipping build uses htdemucs_6s, which splits six ways and
-#      is the weakest Demucs on vocals. This uses the vocals-fine-tuned member
-#      of htdemucs_ft — the best Demucs has for telling a voice from the band.
-#      Four stems only, and only Backing is meaningful: each htdemucs_ft
-#      member emits nonsense for the sources it was not tuned for, so the
-#      instrumental is built as input minus vocals — what `demucs
-#      --two-stems` does — instead of summing the other three.
-#   2. Window. 7.8 s, the length the model was trained on, instead of 3 s.
-#   3. Precision. FP32 instead of FP16.
-#   4. Lookahead. A second of future context instead of 0.12 s.
-#   5. Hop. Large, which both suits the slower model and raises the average
+#   1. Window. 7.8 s, the length the model was trained on, instead of 3 s.
+#      This is the big one: the shipping window was cut to 3 s purely to make
+#      predictions cheap enough for a 0.15 s hop.
+#   2. Precision. FP32 instead of FP16.
+#   3. Lookahead. A second of future context instead of 0.12 s.
+#   4. Hop. Large, which suits the slower model and raises the average
 #      future context every emitted sample gets.
+#
+# TRANSPOSIFY_SUBTRACT=1 is a further lever, off by default here so this is a
+# like-for-like comparison: it builds a mix as the input minus the unchecked
+# stems rather than the sum of the checked ones, keeping whatever the model
+# assigned to no stem at all.
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -63,8 +65,8 @@ fi
 [ -d "$MODEL" ] || {
     echo "error: no quality model at $MODEL" >&2
     echo "       build one with:" >&2
-    echo "         cd tools/htdemucs-coreml && HTDEMUCS_MODEL=htdemucs_ft \\" >&2
-    echo "           HTDEMUCS_BAG_INDEX=3 ../../.build/model-conversion/venv/bin/python \\" >&2
+    echo "         cd tools/htdemucs-coreml && HTDEMUCS_MODEL=htdemucs_6s \\" >&2
+    echo "           ../../.build/model-conversion/venv/bin/python \\" >&2
     echo "           convert.py --segment 7.8 --output /tmp/q.mlpackage" >&2
     echo "         xcrun coremlcompiler compile /tmp/q.mlpackage \"\$(dirname \"$MODEL\")\"" >&2
     exit 1
@@ -75,7 +77,7 @@ cat <<EOF
 
 ==> Quality mode
     model      $(basename "$MODEL")
-    window     7.8 s, FP32, 4 stems (no guitar or piano tiles)
+    window     7.8 s, FP32, six stems as usual
     hop        ${HOP} s
     lookahead  ${LOOKAHEAD} s
     cushion    ${CUSHION} s
@@ -85,7 +87,6 @@ cat <<EOF
 
 EOF
 
-TRANSPOSIFY_SUBTRACT=1 \
 TRANSPOSIFY_MODEL="$MODEL" \
 TRANSPOSIFY_HOP="$HOP" \
 TRANSPOSIFY_LOOKAHEAD="$LOOKAHEAD" \
