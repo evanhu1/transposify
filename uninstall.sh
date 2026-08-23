@@ -69,6 +69,7 @@ else
 fi
 
 echo "==> Resetting privacy permissions"
+tccutil reset AudioCapture "$BUNDLE_ID" >/dev/null 2>&1 || true
 tccutil reset Microphone "$BUNDLE_ID" >/dev/null 2>&1 || true
 tccutil reset AppleEvents "$BUNDLE_ID" >/dev/null 2>&1 || true
 

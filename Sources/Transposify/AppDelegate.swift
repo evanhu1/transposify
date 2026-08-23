@@ -105,21 +105,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 playing \(self?.spotify.isPlaying == true, privacy: .public)
                 """)
         }
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        log.notice("launched; microphone authorization = \(status.rawValue, privacy: .public)")
-        switch status {
-        case .authorized:
-            begin()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                DispatchQueue.main.async {
-                    if !granted { self.controller.reportPermissionDenied() }
-                    begin()
+        // System Audio Recording is the permission the tap actually needs;
+        // ask for it here, off the main thread since the prompt blocks, and
+        // only then start. Microphone follows for the macOS versions that
+        // still gate the tap on it.
+        let afterCapture: () -> Void = {
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            log.notice("launched; microphone authorization = \(status.rawValue, privacy: .public)")
+            switch status {
+            case .authorized:
+                begin()
+            case .notDetermined:
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    DispatchQueue.main.async {
+                        if !granted { self.controller.reportPermissionDenied() }
+                        begin()
+                    }
                 }
+            default:
+                self.controller.reportPermissionDenied()
+                begin()
             }
-        default:
-            controller.reportPermissionDenied()
-            begin()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            AudioCapture.requestAuthorization()
+            DispatchQueue.main.async(execute: afterCapture)
         }
     }
 

@@ -29,11 +29,12 @@ prompt. Either way the app is the same.
    This happens because the app is not signed with an Apple Developer ID,
    so macOS cannot check it. It is a one-time decision; after it the app
    opens like any other.
-5. Look for the `𝄞` in your menu bar. macOS asks for two permissions on first
-   use. **Microphone** is what Core Audio uses to capture Spotify's audio —
-   it never touches your real microphone. **Automation** (controlling
+5. Look for the `𝄞` in your menu bar. macOS asks for permissions on first
+   launch. **System Audio Recording** is what Core Audio uses to capture
+   Spotify's audio (older versions of macOS ask for **Microphone** instead —
+   it never touches your real microphone). **Automation** (controlling
    Spotify) is for reading the current track and pausing Spotify for a few
-   seconds while the model loads. Allow both.
+   seconds while the model loads. Allow them.
 6. To remove vocals or isolate stems, click **Download** in the popover. It
    fetches the separation model (118 MB) once and verifies it.
 

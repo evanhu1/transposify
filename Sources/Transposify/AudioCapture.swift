@@ -53,6 +53,28 @@ final class AudioCapture {
         interleaveScratch.deallocate()
     }
 
+    /// Ask for System Audio Recording permission now, not at the first engage.
+    ///
+    /// The tap needs `kTCCServiceAudioCapture`, which is not the Microphone
+    /// permission the launch sequence already requests, so without this the
+    /// consent dialog appeared at the first engage — right after the model
+    /// download, on top of the popover, which closed it. A global tap that
+    /// is created and destroyed at once triggers the same prompt at launch,
+    /// where a dialog is expected. Blocks until the user answers.
+    static func requestAuthorization() {
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        desc.name = "Transposify Authorization"
+        desc.isPrivate = true
+        desc.muteBehavior = .unmuted
+        var tap = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateProcessTap(desc, &tap)
+        if status == noErr {
+            AudioHardwareDestroyProcessTap(tap)
+        } else {
+            log.notice("audio-capture authorization tap failed: \(status, privacy: .public)")
+        }
+    }
+
     func start() throws {
         guard let pid = NSWorkspace.shared.runningApplications
             .first(where: { $0.bundleIdentifier == spotifyBundleID })?
