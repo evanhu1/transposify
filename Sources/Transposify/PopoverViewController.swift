@@ -106,6 +106,7 @@ final class PopoverViewController: NSViewController {
     /// One text button above the mix controls: the reason they are greyed
     /// out and the way to fix it, in the same place.
     private let downloadButton = NSButton()
+    private lazy var downloadPill = NSStackView(views: [downloadButton])
     private let rememberSwitch = NSSwitch()
     private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
@@ -308,17 +309,44 @@ final class PopoverViewController: NSViewController {
         downloadButton.focusRingType = .none
         downloadButton.font = .systemFont(ofSize: 12, weight: .medium)
         downloadButton.contentTintColor = transposeAccent
-        downloadButton.alignment = .left
+        downloadButton.alignment = .center
         downloadButton.target = self
         downloadButton.action = #selector(modelButtonTapped)
         downloadButton.toolTip = "A \(SeparationModel.downloadSizeDescription) download, once. "
             + "Separation then runs on your Mac; the file is verified against a checksum."
 
-        let mixStack = NSStackView(views: [mixTitle, downloadButton, chipRow, grid])
+        // The chips and tiles sit in a host view so the download button can
+        // float over their centre: the greyed-out controls are the question
+        // and the button on top of them is the answer.
+        let mixBody = NSStackView(views: [chipRow, grid])
+        mixBody.orientation = .vertical
+        mixBody.alignment = .leading
+        mixBody.spacing = 10
+        mixBody.translatesAutoresizingMaskIntoConstraints = false
+        downloadPill.edgeInsets = NSEdgeInsets(top: 7, left: 14, bottom: 7, right: 14)
+        downloadPill.wantsLayer = true
+        downloadPill.layer?.cornerRadius = 10
+        downloadPill.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        downloadPill.layer?.borderWidth = 1
+        downloadPill.layer?.borderColor = NSColor.separatorColor.cgColor
+        downloadPill.translatesAutoresizingMaskIntoConstraints = false
+        let mixHost = NSView()
+        mixHost.addSubview(mixBody)
+        mixHost.addSubview(downloadPill)
+        NSLayoutConstraint.activate([
+            mixBody.leadingAnchor.constraint(equalTo: mixHost.leadingAnchor),
+            mixBody.trailingAnchor.constraint(equalTo: mixHost.trailingAnchor),
+            mixBody.topAnchor.constraint(equalTo: mixHost.topAnchor),
+            mixBody.bottomAnchor.constraint(equalTo: mixHost.bottomAnchor),
+            downloadPill.centerXAnchor.constraint(equalTo: mixHost.centerXAnchor),
+            downloadPill.centerYAnchor.constraint(equalTo: mixHost.centerYAnchor),
+        ])
+
+        let mixStack = NSStackView(views: [mixTitle, mixHost])
         mixStack.orientation = .vertical
         mixStack.alignment = .leading
         mixStack.spacing = 8
-        mixStack.setCustomSpacing(10, after: chipRow)
+        mixHost.widthAnchor.constraint(equalTo: mixStack.widthAnchor).isActive = true
         let karaokeRow: NSView = mixStack
 
         // Notice row: the Automation hint.
@@ -624,7 +652,9 @@ final class PopoverViewController: NSViewController {
             }
         }
         downloadButton.title = title
-        downloadButton.isHidden = title.isEmpty
+        downloadPill.isHidden = title.isEmpty
+        downloadPill.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        downloadPill.layer?.borderColor = NSColor.separatorColor.cgColor
         downloadButton.isEnabled = enabled
         downloadButton.contentTintColor = tint
 
