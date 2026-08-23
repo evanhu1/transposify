@@ -14,7 +14,10 @@
 #   1. Model. The shipping build uses htdemucs_6s, which splits six ways and
 #      is the weakest Demucs on vocals. This uses the vocals-fine-tuned member
 #      of htdemucs_ft — the best Demucs has for telling a voice from the band.
-#      Four stems only, so no guitar or piano tiles.
+#      Four stems only, and only Backing is meaningful: each htdemucs_ft
+#      member emits nonsense for the sources it was not tuned for, so the
+#      instrumental is built as input minus vocals — what `demucs
+#      --two-stems` does — instead of summing the other three.
 #   2. Window. 7.8 s, the length the model was trained on, instead of 3 s.
 #   3. Precision. FP32 instead of FP16.
 #   4. Lookahead. A second of future context instead of 0.12 s.
@@ -82,6 +85,7 @@ cat <<EOF
 
 EOF
 
+TRANSPOSIFY_SUBTRACT=1 \
 TRANSPOSIFY_MODEL="$MODEL" \
 TRANSPOSIFY_HOP="$HOP" \
 TRANSPOSIFY_LOOKAHEAD="$LOOKAHEAD" \

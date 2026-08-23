@@ -163,6 +163,11 @@ final class SeparationEngine {
     /// Clamped: one pathological step must not buy permanent latency.
     static let maxWorstStep = 0.60
 
+    /// Build a mix by removing the unchecked stems from the input rather than
+    /// adding up the checked ones. Experiment only, off unless asked for.
+    static let subtractUnselected =
+        ProcessInfo.processInfo.environment["TRANSPOSIFY_SUBTRACT"] == "1"
+
     static var measuredWorstStep: Double? {
         let v = UserDefaults.standard.double(forKey: worstStepKey)
         return v > 0 ? min(v, maxWorstStep) : nil
@@ -624,15 +629,38 @@ final class SeparationEngine {
                     // Source count comes from the model, not a constant, so a
                     // six-stem model would work without changing this code.
                     let count = sources.shape.count > 1 ? sources.shape[1].intValue : 0
+                    // Subtracting is the other way to build a mix: start from
+                    // the input and take out the stems that were unchecked.
+                    // It keeps whatever the model assigned to no stem at all,
+                    // and it is the only way to use a model whose other stems
+                    // are not meant to be read — htdemucs_ft's members are
+                    // each fine-tuned for one source and emit nonsense for
+                    // the rest, so mix minus vocals is the whole instrumental.
+                    let subtract = Self.subtractUnselected
+                    if subtract {
+                        let W = windowFrames
+                        let base = inputArray.dataPointer.assumingMemoryBound(to: Float.self)
+                        var f = 0
+                        while f < elen {
+                            l[f] = base[start + f]
+                            r[f] = base[W + start + f]
+                            f += 1
+                        }
+                    }
                     func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
-                        for s in 0..<count where mask & (1 << s) != 0 {
+                        for s in 0..<count where (mask & (1 << s) != 0) != subtract {
                             let lBase = s * strides[1]
                             let rBase = s * strides[1] + strides[2]
                             var f = 0
                             while f < elen {
                                 let i = (start + f) * strides[3]
-                                l[f] += Float(p[lBase + i])
-                                r[f] += Float(p[rBase + i])
+                                if subtract {
+                                    l[f] -= Float(p[lBase + i])
+                                    r[f] -= Float(p[rBase + i])
+                                } else {
+                                    l[f] += Float(p[lBase + i])
+                                    r[f] += Float(p[rBase + i])
+                                }
                                 f += 1
                             }
                         }
