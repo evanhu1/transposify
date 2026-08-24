@@ -23,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
 
+        if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_POPOVER_SNAPSHOT"] {
+            popoverSnapshot(to: path)
+            return
+        }
+
 
         if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_GALLERY"] {
             DesignGallery.run(to: path)
@@ -336,6 +341,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     /// Debug-only: render the popover to a PNG (dark appearance) and exit.
+    /// Render the popover the way it is actually used — inside an NSPopover on
+    /// a window — and report the header's frames.
+    ///
+    /// Worth keeping: `snapshotPopover` lays the view out on its own, which
+    /// sizes it to `fittingSize` and so quietly grants every label its full
+    /// intrinsic width. The popover imposes a width instead, and header bugs
+    /// that only appear under an imposed width have got past that snapshot
+    /// twice now — once truncating too late, once far too early.
+    private func popoverSnapshot(to path: String) {
+        controller.testHooks = (engage: { _, _ in }, disengage: { })
+        let env = ProcessInfo.processInfo.environment
+        spotify.injectSnapshotTrack(
+            name: env["TRANSPOSIFY_SNAPSHOT_TITLE"] ?? "Human Nature",
+            artist: env["TRANSPOSIFY_SNAPSHOT_ARTIST"] ?? "Michael Jackson")
+        controller.spotifyUpdate(running: true, playing: true, trackID: "snapshot")
+        controller.setPreset(.all)
+
+        let vc = PopoverViewController(controller: controller, spotify: spotify)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let anchor = NSView(frame: NSRect(x: 280, y: 300, width: 20, height: 20))
+        window.contentView?.addSubview(anchor)
+        window.makeKeyAndOrderFront(nil)
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior = .applicationDefined
+        pop.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        for _ in 0..<40 { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02)) }
+        vc.refresh()
+        vc.view.layoutSubtreeIfNeeded()
+        for _ in 0..<20 { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02)) }
+        vc.reportHeaderFrames()
+
+        let content = vc.view
+        if let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+            content.cacheDisplay(in: content.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+        }
+        exit(0)
+    }
+
     private func snapshotPopover(to path: String) {
         controller.testHooks = (engage: { _, _ in }, disengage: { })
         // Overridable so a long title can be checked against the header's width.

@@ -418,23 +418,16 @@ final class PopoverViewController: NSViewController {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
         nowRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        // Fill the row when there is room, so a long title truncates at the
-        // row's edge rather than at its own natural width...
-        for v in [titleRow, trackLabel, artistLabel] as [NSView] {
-            let fill = v.widthAnchor.constraint(equalTo: nowRow.widthAnchor)
-            fill.priority = .defaultHigh
-            fill.isActive = true
-        }
-        // ...but never past the power button, whatever width the stack works
-        // out for the row. This is the constraint that actually holds the
-        // header together: the labels' compression resistance is low, so the
-        // only way to satisfy it is to truncate. Without it the row's width
-        // is the stack's business, and a title long enough to overrun it drew
-        // straight over the button and off the popover.
-        for label in [trackLabel, artistLabel] {
-            label.trailingAnchor.constraint(lessThanOrEqualTo: powerButton.leadingAnchor,
-                                            constant: -8).isActive = true
-        }
+        titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
+        artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
+        // The labels are exactly as wide as the row above, so the row's width
+        // is what decides where they truncate — and that width is the stack
+        // view's arithmetic, not a promise. Bound it against the power button
+        // directly. The labels resist compression weakly, so the only way to
+        // satisfy this is to truncate; without it a long title drew over the
+        // button and off the popover's edge.
+        nowRow.trailingAnchor.constraint(lessThanOrEqualTo: powerButton.leadingAnchor,
+                                         constant: -8).isActive = true
         artwork.onChange = { [weak self] in self?.refresh() }
         inactiveWhenOff = [header, sliderRow, karaokeRow, rememberRow]
         view = container
@@ -609,6 +602,20 @@ final class PopoverViewController: NSViewController {
     /// Only the height is taken. The width is a design constant, and a long
     /// track title reports a `fittingSize` a few points wider than it, which
     /// would nudge the popover sideways as songs change.
+    /// What width the header's parts ended up with, for `popoverSnapshot`.
+    func reportHeaderFrames() {
+        func f(_ name: String, _ v: NSView?) {
+            guard let v else { return }
+            print(String(format: "  %-12@ w %6.1f  right edge %6.1f",
+                         name, v.frame.width, v.convert(v.bounds, to: nil).maxX))
+        }
+        print("popover width \(view.frame.width)")
+        f("trackLabel", trackLabel)
+        f("artistLabel", artistLabel)
+        f("nowRow", artistLabel.superview)
+        f("powerButton", powerButton)
+    }
+
     private func updatePreferredSize() {
         view.layoutSubtreeIfNeeded()
         let height = view.fittingSize.height
