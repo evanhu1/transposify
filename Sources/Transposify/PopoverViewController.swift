@@ -99,6 +99,7 @@ final class PopoverViewController: NSViewController {
     private var presetChips: [MixPreset: MixChip] = [:]
     private var stemGrid: NSStackView!
     private var stemTiles: [StemTile] = []
+    private var stemFaders: [Stem: NSSlider] = [:]
     private var builtStemCount = 0
     private let modelLabel = NSTextField(labelWithString: "")
     private let modelButton = NSButton()
@@ -504,6 +505,14 @@ final class PopoverViewController: NSViewController {
             chip.lit = (controller.preset == preset)
             chip.isEnabled = controller.enabled && (installed || preset == .all)
         }
+        for (stem, fader) in stemFaders {
+            let level = Double(controller.gain(for: stem))
+            // Never fight a drag in progress.
+            if abs(fader.doubleValue - level) > 0.001, fader.window?.firstResponder !== fader {
+                fader.doubleValue = level
+            }
+            fader.isEnabled = controller.enabled && SeparationModel.isInstalled
+        }
         for tile in stemTiles {
             tile.lit = controller.includes(tile.stem)
             tile.isEnabled = controller.enabled && installed
@@ -734,6 +743,7 @@ final class PopoverViewController: NSViewController {
         builtStemCount = count
 
         stemTiles.removeAll()
+        stemFaders.removeAll()
         for row in stemGrid.arrangedSubviews {
             stemGrid.removeArrangedSubview(row)
             row.removeFromSuperview()
@@ -748,7 +758,26 @@ final class PopoverViewController: NSViewController {
                 StemTile(stem: $0, target: self, action: #selector(stemTapped(_:)))
             }
             stemTiles.append(contentsOf: tiles)
-            let row = NSStackView(views: tiles)
+            // A fader under each tile. The tile still mutes and unmutes; the
+            // fader sets how much of that stem is in the mix, and because the
+            // mixing happens at the render side it is heard immediately.
+            let columnsViews: [NSView] = tiles.map { tile in
+                let fader = NSSlider(value: Double(controller.gain(for: tile.stem)),
+                                     minValue: 0, maxValue: 2,
+                                     target: self, action: #selector(stemFaderMoved(_:)))
+                fader.controlSize = .mini
+                fader.isContinuous = true
+                fader.tag = tile.stem.rawValue
+                fader.toolTip = "\(tile.stem.title) level"
+                stemFaders[tile.stem] = fader
+                let column = NSStackView(views: [tile, fader])
+                column.orientation = .vertical
+                column.alignment = .centerX
+                column.spacing = 4
+                fader.widthAnchor.constraint(equalTo: tile.widthAnchor).isActive = true
+                return column
+            }
+            let row = NSStackView(views: columnsViews)
             row.orientation = .horizontal
             row.alignment = .centerY
             row.distribution = .fillEqually
@@ -759,6 +788,11 @@ final class PopoverViewController: NSViewController {
                 equalToConstant: Self.contentWidth).isActive = true
             stemGrid.addArrangedSubview(row)
         }
+    }
+
+    @objc private func stemFaderMoved(_ sender: NSSlider) {
+        guard let stem = Stem(rawValue: sender.tag) else { return }
+        controller.setStemGain(stem, Float(sender.doubleValue))
     }
 
     @objc private func stemTapped(_ sender: StemTile) {

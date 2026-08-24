@@ -56,6 +56,20 @@ final class PitchEngine {
     private let inputPtrs: UnsafeMutablePointer<UnsafePointer<Float>?>
     private let outputPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private let readScratch: UnsafeMutablePointer<Float>
+    /// Where each fader actually is, as opposed to where it has been put.
+    /// Owned here so the render closure can capture it without capturing self.
+    private let liveGain: UnsafeMutablePointer<Float>
+
+    /// One fader per stem slot, in thousandths so the render callback can read
+    /// them atomically. The mix happens here, at the very end of the pipeline,
+    /// which is why moving a fader is heard immediately instead of a pipeline
+    /// depth later.
+    private let stemGainMilli = (0..<SeparationEngine.mixStems).map { _ in AtomicInt(1000) }
+
+    func setStemGain(_ stem: Int, _ gain: Float) {
+        guard stem >= 0, stem < stemGainMilli.count else { return }
+        stemGainMilli[stem].set(Int((max(0, min(4, gain)) * 1000).rounded()))
+    }
     private var manualOutputBuffers: [UnsafeMutablePointer<Float>] = []
     private typealias RenderCore = (
         UnsafeMutablePointer<ObjCBool>, Int,
@@ -114,7 +128,10 @@ final class PitchEngine {
         channelBuffers = (0..<ch).map { _ in .allocate(capacity: Self.maxBlock) }
         inputPtrs = .allocate(capacity: ch)
         outputPtrs = .allocate(capacity: ch)
-        readScratch = .allocate(capacity: Self.maxBlock * ch)
+        // The ring carries every stem, both channels, per frame.
+        readScratch = .allocate(capacity: Self.maxBlock * ch * SeparationEngine.mixStems)
+        liveGain = .allocate(capacity: SeparationEngine.mixStems)
+        liveGain.initialize(repeating: 1, count: SeparationEngine.mixStems)
         for c in 0..<ch { inputPtrs[c] = UnsafePointer(channelBuffers[c]) }
         if manualRendering {
             manualOutputBuffers = (0..<ch).map { _ in .allocate(capacity: Self.maxBlock) }
@@ -123,6 +140,7 @@ final class PitchEngine {
 
     deinit {
         channelBuffers.forEach { $0.deallocate() }
+        liveGain.deallocate()
         inputPtrs.deallocate()
         outputPtrs.deallocate()
         readScratch.deallocate()
@@ -148,6 +166,14 @@ final class PitchEngine {
         let ring = self.ring
         let ch = self.channels
         let maxBlock = Self.maxBlock
+        let stems = SeparationEngine.mixStems
+        let ringChannels = ch * stems
+        let stemGainMilli = self.stemGainMilli
+        let liveGain = self.liveGain
+        // Stepping straight to a new gain clicks; this walks there over about
+        // 8 ms, the same trick the hold fade uses.
+        for stem in 0..<stems { liveGain[stem] = Float(stemGainMilli[stem].get()) / 1000 }
+        let gainStepPerSample = Float(1.0 / (0.008 * sampleRate))
         let readScratch = self.readScratch
         let channelBuffers = self.channelBuffers
         let inputPtrs = self.inputPtrs
@@ -197,13 +223,35 @@ final class PitchEngine {
                 iterations += 1
                 let required = Int(rubberband_get_samples_required(state))
                 let want = min(max(required, 256), maxBlock)
-                let got = ring.read(into: readScratch, count: want * ch) / ch
+                let got = ring.read(into: readScratch, count: want * ringChannels) / ringChannels
                 if got == 0 { break }
 
+                // Mix the stems down with the faders, ramping each toward its
+                // target so a drag sounds continuous rather than stepped.
                 for c in 0..<ch {
                     let dst = channelBuffers[c]
                     var f = 0
-                    while f < got { dst[f] = readScratch[f * ch + c]; f += 1 }
+                    while f < got { dst[f] = 0; f += 1 }
+                }
+                for stem in 0..<stems {
+                    let target = Float(stemGainMilli[stem].get()) / 1000
+                    var g = liveGain[stem]
+                    if g == 0 && target == 0 { continue }
+                    let base = stem * ch
+                    for c in 0..<ch {
+                        let dst = channelBuffers[c]
+                        let src = readScratch + base + c
+                        var gain = g
+                        var f = 0
+                        while f < got {
+                            if gain < target { gain = min(target, gain + gainStepPerSample) }
+                            else if gain > target { gain = max(target, gain - gainStepPerSample) }
+                            dst[f] += src[f * ringChannels] * gain
+                            f += 1
+                        }
+                        if c == ch - 1 { g = gain }
+                    }
+                    liveGain[stem] = g
                 }
                 rubberband_process(state, UnsafePointer(inputPtrs), UInt32(got), 0)
             }

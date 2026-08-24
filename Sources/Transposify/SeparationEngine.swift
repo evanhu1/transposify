@@ -88,6 +88,11 @@ final class SeparationEngine {
 
     // MARK: - Model geometry (must match the converted .mlmodelc)
 
+    /// Stem slots carried through the output ring, whatever the model has.
+    /// Fixed so the ring's frame layout never depends on which model is
+    /// loaded: a four-stem model leaves the last two slots silent.
+    static let mixStems = 6
+
     static let modelRate: Double = 44_100
     /// The window the converter baked in, when nothing better is known.
     /// `convert.py --segment` sets it; the app reads the real value from the
@@ -243,15 +248,18 @@ final class SeparationEngine {
     // system converter is not used here.
     private let downL: Resampler
     private let downR: Resampler
-    private let upL: Resampler
-    private let upR: Resampler
+    private let upL: [Resampler]
+    private let upR: [Resampler]
+
+    /// Floats per frame in the output ring: every stem, both channels.
+    var ringChannels: Int { channels * Self.mixStems }
 
     // Preallocated conversion buffers; the worker reuses them every step.
     private let readFrames: Int             // capture frames per drain pass
     private var interleaveScratch: [Float]
     private var planeScratch: [Float]
-    private var outL: [Float] = []
-    private var outR: [Float] = []
+    private var outL: [[Float]]
+    private var outR: [[Float]]
 
     private let ramp: [Float]              // raised cosine, `rampFrames` long
 
@@ -269,10 +277,10 @@ final class SeparationEngine {
     private var stagingL: [Float] = []
     private var stagingR: [Float] = []
     private var primed = false
-    private var carryL: [Float]
-    private var carryR: [Float]
-    private var emitL: [Float]
-    private var emitR: [Float]
+    private var carryL: [[Float]]
+    private var carryR: [[Float]]
+    private var emitL: [[Float]]
+    private var emitR: [[Float]]
     private var stepPredicted = false
     /// How long the last step's prediction took, so the recorder can tell
     /// model time from the window slide, the gather and the resampling.
@@ -354,7 +362,7 @@ final class SeparationEngine {
     /// what still waits in the output ring. A boundary recorded at
     /// `stagedCaptureFrames` has been *heard* once this counter passes it.
     var consumedCaptureFrames: Int {
-        publishedCounter.get() - outputRing.availableToRead / channels
+        publishedCounter.get() - outputRing.availableToRead / ringChannels
     }
 
     final class FailureBox: @unchecked Sendable {
@@ -393,7 +401,8 @@ final class SeparationEngine {
         // Sized for the pause case: while the output is held nothing drains,
         // and the worker parks up to ~3 s of finished audio here (the rest
         // waits in staging, paced by `stepIfReady`). 4 s never overflows.
-        outputRing = RingBuffer(capacityFloats: Int(captureRate * 4.0) * self.channels)
+        outputRing = RingBuffer(
+            capacityFloats: Int(captureRate * 4.0) * self.channels * Self.mixStems)
 
         inputArray = try MLMultiArray(
             shape: [1, 2, NSNumber(value: windowFrames)], dataType: .float32)
@@ -404,23 +413,26 @@ final class SeparationEngine {
 
         downL = Resampler(inRate: captureRate, outRate: Self.modelRate)
         downR = Resampler(inRate: captureRate, outRate: Self.modelRate)
-        upL = Resampler(inRate: Self.modelRate, outRate: captureRate)
-        upR = Resampler(inRate: Self.modelRate, outRate: captureRate)
+        upL = (0..<Self.mixStems).map { _ in Resampler(inRate: Self.modelRate, outRate: captureRate) }
+        upR = (0..<Self.mixStems).map { _ in Resampler(inRate: Self.modelRate, outRate: captureRate) }
 
         // One drain pass takes at most this much; the capture ring holds
         // ~0.5 s, so this is never the limit.
         readFrames = Int(captureRate * 2.0)
         interleaveScratch = [Float](repeating: 0, count: readFrames * self.channels)
         planeScratch = [Float](repeating: 0, count: readFrames)
-        outL.reserveCapacity(Int(captureRate))
-        outR.reserveCapacity(Int(captureRate))
+        outL = (0..<Self.mixStems).map { _ in
+            var v = [Float](); v.reserveCapacity(Int(captureRate)); return v
+        }
+        outR = outL
 
         let n = 2 * crossfadeFrames
         ramp = (0..<n).map { 0.5 - 0.5 * cos(Float.pi * Float($0) / Float(n - 1)) }
-        carryL = [Float](repeating: 0, count: n)
-        carryR = [Float](repeating: 0, count: n)
-        emitL = [Float](repeating: 0, count: hopFrames + n)
-        emitR = [Float](repeating: 0, count: hopFrames + n)
+        carryL = Array(repeating: [Float](repeating: 0, count: n), count: Self.mixStems)
+        carryR = carryL
+        emitL = Array(repeating: [Float](repeating: 0, count: hopFrames + n),
+                      count: Self.mixStems)
+        emitR = emitL
         stagingL.reserveCapacity(Int(Self.modelRate) * 4)
         stagingR.reserveCapacity(Int(Self.modelRate) * 4)
     }
@@ -456,7 +468,7 @@ final class SeparationEngine {
             """)
         while shouldRun.get() {
             drainInput()
-            let ringBefore = outputRing.availableToRead / channels
+            let ringBefore = outputRing.availableToRead / ringChannels
             let began = Date()
             let did = stepIfReady()
             if did {
@@ -465,7 +477,7 @@ final class SeparationEngine {
                 recording?.write(durationMs: elapsed * 1_000,
                     predictMs: lastPredictSeconds * 1_000,
                     ringBeforeFrames: ringBefore,
-                    ringAfterFrames: outputRing.availableToRead / channels,
+                    ringAfterFrames: outputRing.availableToRead / ringChannels,
                     stagingFrames: stagingL.count, predicted: stepPredicted,
                     stagedFrames: stagedCounter.get(), publishedFrames: publishedCounter.get())
             } else {
@@ -475,7 +487,7 @@ final class SeparationEngine {
             // Only once playing: while held nothing drains, and while priming
             // the ring is legitimately empty.
             if gate.get(), primed {
-                let occupancy = outputRing.availableToRead / channels
+                let occupancy = outputRing.availableToRead / ringChannels
                 if occupancy < minOutputBox.get() { minOutputBox.set(occupancy) }
             }
         }
@@ -539,7 +551,7 @@ final class SeparationEngine {
         // Pace on output-ring room. While the render side is held (pause),
         // nothing drains; predicting anyway would overflow the ring and DROP
         // finished audio. Waiting keeps it safe in staging instead.
-        let neededRoom = (hopCaptureFrames + 64) * channels
+        let neededRoom = (hopCaptureFrames + 64) * ringChannels
         guard outputRing.availableToWrite >= neededRoom else { return false }
 
         slideWindow(by: needed)
@@ -613,31 +625,58 @@ final class SeparationEngine {
         }
     }
 
-    /// Sum the non-vocal stems over the emit region, apply the crossfade
-    /// envelope, and overlap-add the previous window's tail.
+    /// Lay each stem's emit region out separately, crossfaded and overlap-added
+    /// against the previous window, and leave the mixing to the render side.
+    ///
+    /// The worker used to sum the selected stems here, which meant a change of
+    /// mix had to travel the pipeline's whole depth before it could be heard.
+    /// Publishing the stems apart costs a wider ring and one resampler pair
+    /// each, and buys faders that respond immediately.
     private func buildEmitRegion(from sources: MLMultiArray?, selection: StemSelection) {
         let elen = emitFrames
         let start = pastFrames - crossfadeFrames
         let n = rampFrames
 
-        for i in 0..<elen { emitL[i] = 0; emitR[i] = 0 }
+        // Stems the model does not have stay silent; the mixer's faders for
+        // them then do nothing, which is what a four-stem model should feel
+        // like in a six-slot interface.
+        let count = sources.flatMap {
+            $0.shape.count > 1 ? $0.shape[1].intValue : nil
+        } ?? 0
+        let live = selection.isPassthrough ? 1 : min(count, Self.mixStems)
 
-        emitL.withUnsafeMutableBufferPointer { l in
-            emitR.withUnsafeMutableBufferPointer { r in
-                if let sources, case .stems(let mask) = selection {
-                    let strides = sources.strides.map(\.intValue)
-                    // Source count comes from the model, not a constant, so a
-                    // six-stem model would work without changing this code.
-                    let count = sources.shape.count > 1 ? sources.shape[1].intValue : 0
-                    // Subtracting is the other way to build a mix: start from
-                    // the input and take out the stems that were unchecked.
-                    // It keeps whatever the model assigned to no stem at all,
-                    // and it is the only way to use a model whose other stems
-                    // are not meant to be read — htdemucs_ft's members are
-                    // each fine-tuned for one source and emit nonsense for
-                    // the rest, so mix minus vocals is the whole instrumental.
-                    let subtract = Self.subtractUnselected
-                    if subtract {
+        for stem in 0..<Self.mixStems {
+            emitL[stem].withUnsafeMutableBufferPointer { l in
+                emitR[stem].withUnsafeMutableBufferPointer { r in
+                    for i in 0..<elen { l[i] = 0; r[i] = 0 }
+                    if stem >= live { return }
+
+                    if let sources, !selection.isPassthrough {
+                        let strides = sources.strides.map(\.intValue)
+                        func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
+                            let lBase = stem * strides[1]
+                            let rBase = stem * strides[1] + strides[2]
+                            var f = 0
+                            while f < elen {
+                                let i = (start + f) * strides[3]
+                                l[f] = Float(p[lBase + i])
+                                r[f] = Float(p[rBase + i])
+                                f += 1
+                            }
+                        }
+                        switch sources.dataType {
+                        case .float32: gather(sources.dataPointer.assumingMemoryBound(to: Float.self))
+                        case .float16: gather(sources.dataPointer.assumingMemoryBound(to: Float16.self))
+                        default:
+                            log.error("unexpected model output dtype \(sources.dataType.rawValue)")
+                            failureBox.set("Unexpected model output type.")
+                            return
+                        }
+                    } else {
+                        // Passthrough: the same region of the same window,
+                        // copied straight from the input into the first slot.
+                        // The controller only chooses passthrough when every
+                        // fader is at unity, so the mixer's sum is the input.
                         let W = windowFrames
                         let base = inputArray.dataPointer.assumingMemoryBound(to: Float.self)
                         var f = 0
@@ -647,60 +686,22 @@ final class SeparationEngine {
                             f += 1
                         }
                     }
-                    func gather<T: BinaryFloatingPoint>(_ p: UnsafePointer<T>) {
-                        for s in 0..<count where (mask & (1 << s) != 0) != subtract {
-                            let lBase = s * strides[1]
-                            let rBase = s * strides[1] + strides[2]
-                            var f = 0
-                            while f < elen {
-                                let i = (start + f) * strides[3]
-                                if subtract {
-                                    l[f] -= Float(p[lBase + i])
-                                    r[f] -= Float(p[rBase + i])
-                                } else {
-                                    l[f] += Float(p[lBase + i])
-                                    r[f] += Float(p[rBase + i])
-                                }
-                                f += 1
+
+                    // Fade in over the first `n`, fade out over the last `n`.
+                    for f in 0..<n {
+                        let g = ramp[f], h = ramp[n - 1 - f]
+                        l[f] *= g;             r[f] *= g
+                        l[elen - n + f] *= h;  r[elen - n + f] *= h
+                    }
+
+                    // Add the previous tail, then stash this window's.
+                    carryL[stem].withUnsafeMutableBufferPointer { cl in
+                        carryR[stem].withUnsafeMutableBufferPointer { cr in
+                            for f in 0..<n { l[f] += cl[f]; r[f] += cr[f] }
+                            for f in 0..<n {
+                                cl[f] = l[hopFrames + f]
+                                cr[f] = r[hopFrames + f]
                             }
-                        }
-                    }
-                    switch sources.dataType {
-                    case .float32: gather(sources.dataPointer.assumingMemoryBound(to: Float.self))
-                    case .float16: gather(sources.dataPointer.assumingMemoryBound(to: Float16.self))
-                    default:
-                        log.error("unexpected model output dtype \(sources.dataType.rawValue)")
-                        failureBox.set("Unexpected model output type.")
-                        return
-                    }
-                } else {
-                    // Passthrough: the same region of the same window, copied
-                    // straight from the input. Identical timing to a predicted
-                    // hop, which is what makes the switch seamless.
-                    let W = windowFrames
-                    let base = inputArray.dataPointer.assumingMemoryBound(to: Float.self)
-                    var f = 0
-                    while f < elen {
-                        l[f] = base[start + f]
-                        r[f] = base[W + start + f]
-                        f += 1
-                    }
-                }
-
-                // Fade in over the first `n`, fade out over the last `n`.
-                for f in 0..<n {
-                    let g = ramp[f], h = ramp[n - 1 - f]
-                    l[f] *= g;             r[f] *= g
-                    l[elen - n + f] *= h;  r[elen - n + f] *= h
-                }
-
-                // Add the previous tail, then stash this window's.
-                carryL.withUnsafeMutableBufferPointer { cl in
-                    carryR.withUnsafeMutableBufferPointer { cr in
-                        for f in 0..<n { l[f] += cl[f]; r[f] += cr[f] }
-                        for f in 0..<n {
-                            cl[f] = l[hopFrames + f]
-                            cr[f] = r[hopFrames + f]
                         }
                     }
                 }
@@ -710,27 +711,38 @@ final class SeparationEngine {
 
     /// Resample one hop back to the capture rate and write it to the output ring.
     private func publish() {
-        outL.removeAll(keepingCapacity: true)
-        outR.removeAll(keepingCapacity: true)
-        emitL.withUnsafeBufferPointer { upL.process($0.baseAddress!, count: hopFrames, into: &outL) }
-        emitR.withUnsafeBufferPointer { upR.process($0.baseAddress!, count: hopFrames, into: &outR) }
-        // Both resamplers advance by the same step, so the counts agree; the
+        var n = Int.max
+        for stem in 0..<Self.mixStems {
+            outL[stem].removeAll(keepingCapacity: true)
+            outR[stem].removeAll(keepingCapacity: true)
+            emitL[stem].withUnsafeBufferPointer {
+                upL[stem].process($0.baseAddress!, count: hopFrames, into: &outL[stem])
+            }
+            emitR[stem].withUnsafeBufferPointer {
+                upR[stem].process($0.baseAddress!, count: hopFrames, into: &outR[stem])
+            }
+            n = min(n, min(outL[stem].count, outR[stem].count))
+        }
+        // Every resampler advances by the same step, so the counts agree; the
         // minimum is only a guard.
-        let n = min(outL.count, outR.count)
-        guard n > 0 else { return }
-        let count = n * channels
+        guard n > 0, n != Int.max else { return }
+
+        let count = n * ringChannels
         if interleaveScratch.count < count {
             interleaveScratch = [Float](repeating: 0, count: count)
         }
         interleaveScratch.withUnsafeMutableBufferPointer { dst in
-            var f = 0
-            if channels == 1 {
-                while f < n { dst[f] = outL[f]; f += 1 }
-            } else {
-                while f < n {
-                    dst[f * channels] = outL[f]
-                    dst[f * channels + 1] = outR[f]
-                    f += 1
+            for stem in 0..<Self.mixStems {
+                outL[stem].withUnsafeBufferPointer { l in
+                    outR[stem].withUnsafeBufferPointer { r in
+                        let base = stem * channels
+                        var f = 0
+                        while f < n {
+                            dst[f * ringChannels + base] = l[f]
+                            if channels > 1 { dst[f * ringChannels + base + 1] = r[f] }
+                            f += 1
+                        }
+                    }
                 }
             }
             outputRing.write(dst.baseAddress!, count: count)

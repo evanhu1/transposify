@@ -70,6 +70,11 @@ final class AudioController {
 
     /// The single source of truth: which stems reach the output.
     private(set) var stemMask: Int
+
+    /// A level per stem slot, 0 to 2, applied at the render side. The mask
+    /// above stays the on/off truth the presets and tiles read; a stem is
+    /// "in" exactly when its level is above zero.
+    private(set) var stemGains: [Float]
     /// How many stems existed when `stemMask` was last saved. A model with more
     /// stems turns the new ones on rather than leaving them silently off — the
     /// user never unchecked something that did not exist.
@@ -129,6 +134,7 @@ final class AudioController {
     private static let reductionKey = "vocalReduction"        // legacy string
     private static let isolateKey = "isolateTrack"       // legacy, read once
     private static let advancedKey = "advancedStems"     // legacy Bool, unused
+    private static let stemGainsKey = "stemGains"
     private static let stemMaskKey = "stemMask"
     private static let stemMaskCountKey = "stemMaskCount"
 
@@ -153,6 +159,15 @@ final class AudioController {
         // Nothing can be dropped without the model, so start on the full mix
         // rather than showing a selection that silently is not happening.
         if !SeparationModel.isInstalled { stemMask = available }
+        // Levels default to unity for whatever the mask has switched on.
+        // Read through a local: the closure would otherwise capture self
+        // before every member is initialised.
+        let mask = stemMask
+        let storedGains = defaults.array(forKey: Self.stemGainsKey) as? [Double]
+        stemGains = (0..<SeparationEngine.mixStems).map { i in
+            if let storedGains, i < storedGains.count { return Float(storedGains[i]) }
+            return mask & (1 << i) != 0 ? 1 : 0
+        }
         // Loading is slow, so it happens off the main thread; engagement waits
         // for readiness rather than blocking on it.
         modelLoader.onChange = { [weak self] in
@@ -475,6 +490,7 @@ final class AudioController {
             return
         }
         stemMask = mask(for: new)
+        syncGainsToMask()
         persistSelection()
         if needsModel { lastError = nil; modelLoader.prepare() } else { releaseModelIfIdle() }
         applySelection()
@@ -488,6 +504,7 @@ final class AudioController {
         let updated = included ? (stemMask | bit) : (stemMask & ~bit)
         guard updated != stemMask else { return }
         stemMask = updated
+        syncGainsToMask()
         persistSelection()
         if needsModel { modelLoader.prepare() }
         applySelection()
@@ -498,9 +515,50 @@ final class AudioController {
 
     func includes(_ stem: Stem) -> Bool { stemMask & (1 << stem.rawValue) != 0 }
 
+    func gain(for stem: Stem) -> Float { stemGains[stem.rawValue] }
+
+    /// Move one fader. The mix happens at the render side, so this is heard on
+    /// the next buffer rather than a pipeline depth later — the whole point of
+    /// carrying the stems apart.
+    func setStemGain(_ stem: Stem, _ gain: Float) {
+        let clamped = max(0, min(2, gain))
+        guard clamped != stemGains[stem.rawValue] else { return }
+        stemGains[stem.rawValue] = clamped
+        engine?.setStemGain(stem.rawValue, clamped)
+        // Zero is the same statement as unchecking, so keep the mask in step.
+        let bit = 1 << stem.rawValue
+        let updated = clamped > 0 ? (stemMask | bit) : (stemMask & ~bit)
+        if updated != stemMask {
+            stemMask = updated
+            applySelection()
+            updateEngagement()
+        }
+        persistSelection()
+        onChange?()
+    }
+
+    /// Push every level at the engine, after a rebuild or at engage.
+    private func applyStemGains() { engine.map(applyStemGainsTo) }
+
+    private func applyStemGainsTo(_ engine: PitchEngine) {
+        for i in 0..<stemGains.count { engine.setStemGain(i, stemGains[i]) }
+    }
+
+    /// A tile switched off means level zero; switched on restores unity,
+    /// since a stem at zero that claims to be included would be a lie.
+    private func syncGainsToMask() {
+        for i in 0..<stemGains.count {
+            let on = stemMask & (1 << i) != 0
+            if on && stemGains[i] == 0 { stemGains[i] = 1 }
+            if !on { stemGains[i] = 0 }
+        }
+        applyStemGains()
+    }
+
     private func persistSelection() {
         guard !simulationMode else { return }
         let defaults = UserDefaults.standard
+        defaults.set(stemGains.map(Double.init), forKey: Self.stemGainsKey)
         defaults.set(stemMask, forKey: Self.stemMaskKey)
         defaults.set(stemCount, forKey: Self.stemMaskCountKey)
     }
@@ -509,9 +567,12 @@ final class AudioController {
     private var currentSelection: StemSelection {
         let available = (1 << stemCount) - 1
         let mask = stemMask & available
-        // Everything selected is the untouched mix, which passthrough gives
-        // bit-exact and without running the model at all.
-        return mask == available ? .passthrough : .stems(mask: mask)
+        // Everything selected *at unity* is the untouched mix, which
+        // passthrough gives bit-exact and without running the model at all.
+        // The render mixer sums slot 0 alone in that case, so the levels have
+        // to be exactly 1 for the sum to be the input.
+        let atUnity = (0..<stemCount).allSatisfy { stemGains[$0] == 1 }
+        return mask == available && atUnity ? .passthrough : .stems(mask: mask)
     }
 
     private func applySelection() {
@@ -822,6 +883,7 @@ final class AudioController {
             stepsSettled = false
             let cushion = cushionSeconds
             primeFloats = Int((cushion + separation.hopSeconds) * capture.sampleRate)
+                * SeparationEngine.mixStems
                 * capture.channelCount
             targetDepth = separation.nominalDelay + cushion
             governorRatio = 1.0
@@ -836,6 +898,7 @@ final class AudioController {
                                      channels: capture.channelCount, ring: sourceRing,
                                      recorder: recorder, manualRendering: simulationMode)
             engine.semitones = semitones
+            applyStemGainsTo(engine)
             engine.onConfigurationChange = { [weak self] in self?.reconfigure() }
             // Hold output until a cushion of audio exists. Releasing as soon as
             // the ring is merely non-empty leaves no floor, so every hiccup —

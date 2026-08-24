@@ -67,6 +67,15 @@ enum SeparationFileTest {
                 selection = .stems(mask: StemSelection.mask(
                     (0..<stems).filter { $0 != Stem.vocalsIndex }))
             }
+            // Mixing moved to the render side, so this test does the summing
+            // itself: the selection says which stems belong in the file.
+            var mixGain = [Bool](repeating: false, count: SeparationEngine.mixStems)
+            switch selection {
+            case .passthrough:
+                mixGain[0] = true          // the engine copies the input to slot 0
+            case .stems(let mask):
+                for i in 0..<SeparationEngine.mixStems { mixGain[i] = mask & (1 << i) != 0 }
+            }
             engine.setSelection(selection)
             emit("mode: \(requested) over \(stems) stems")
             engine.start()
@@ -94,17 +103,35 @@ enum SeparationFileTest {
                         fed += n
                     }
                 }
+                // The ring carries every stem apart now; the live mixer is at
+                // the render side, so sum them here at unity to get the mix
+                // this test has always written.
+                let rc = engine.ringChannels
+                let want = (drain.count / rc) * rc
                 let got = drain.withUnsafeMutableBufferPointer {
-                    engine.outputRing.read(into: $0.baseAddress!, count: $0.count)
+                    engine.outputRing.read(into: $0.baseAddress!, count: want)
                 }
                 if got > 0 {
-                    produced.append(contentsOf: drain[0..<got])
+                    let frames = got / rc
+                    for f in 0..<frames {
+                        for c in 0..<channels {
+                            var sum: Float = 0
+                            for stem in 0..<SeparationEngine.mixStems where mixGain[stem] {
+                                sum += drain[f * rc + stem * channels + c]
+                            }
+                            produced.append(sum)
+                        }
+                    }
                     idleTicks = 0
                     if !switched,
                        Double(produced.count / channels) / captureRate >= switchAt {
                         switched = true
-                        engine.setSelection(.stems(mask: StemSelection.mask(
-                            (0..<(loader.stemCount ?? 4)).filter { $0 != Stem.vocalsIndex })))
+                        let switched = StemSelection.mask(
+                            (0..<(loader.stemCount ?? 4)).filter { $0 != Stem.vocalsIndex })
+                        for i in 0..<SeparationEngine.mixStems {
+                            mixGain[i] = switched & (1 << i) != 0
+                        }
+                        engine.setSelection(.stems(mask: switched))
                         emit(String(format: "  switched to instrumental at %.2fs",
                                     Double(produced.count / channels) / captureRate))
                     }
