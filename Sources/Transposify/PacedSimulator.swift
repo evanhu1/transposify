@@ -174,12 +174,16 @@ enum PacedSimulator {
             var playing = true
             var trackNumber = 0
             controller.spotifyUpdate(running: true, playing: true, trackID: "simulation:0")
-            guard let source else { fail("controller did not start its source") }
+            guard source != nil else { fail("controller did not start its source") }
 
             let began = DispatchTime.now().uptimeNanoseconds
             var tick = 0
             var nextAction = 0
-            while !source.finished {
+            // Read `source` fresh every tick: rebuilding the pipeline — which
+            // a change of formant mode or a route change does — makes the
+            // controller ask the factory for a new one, and pushing into the
+            // old one feeds a capture ring nothing reads any more.
+            while !(source?.finished ?? true) {
                 let sessionTime = Double(tick) * tickSeconds
                 if let secondsLimit, sessionTime >= secondsLimit { break }
                 while nextAction < actions.count, actions[nextAction].time <= sessionTime {
@@ -187,7 +191,7 @@ enum PacedSimulator {
                           playing: &playing, trackNumber: &trackNumber)
                     nextAction += 1
                 }
-                if playing { _ = source.push(frames: tickFrames) }
+                if playing { _ = source?.push(frames: tickFrames) }
                 try controller.renderSimulation(frames: tickFrames, into: output)
                 tick += 1
                 wait(until: began + UInt64(Double(tick) * tickSeconds / speed * 1_000_000_000))

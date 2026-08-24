@@ -32,23 +32,22 @@ enum Stem: Int, CaseIterable {
 /// further, which is worth a try because the estimate comes from the whole
 /// mix rather than the voice alone and tends to under-correct.
 enum FormantMode: String, CaseIterable {
-    case off, natural, lift10, lift20
+    case off, natural, split
 
     var title: String {
         switch self {
         case .off: return "Off"
         case .natural: return "Natural"
-        case .lift10: return "+10%"
-        case .lift20: return "+20%"
+        case .split: return "Split"
         }
     }
 
     var summary: String {
         switch self {
         case .off: return "Let the voice move with the key. Lower sounds larger."
-        case .natural: return "Hold the singer's tone where it was."
-        case .lift10: return "Hold it, and lift a further 10%."
-        case .lift20: return "Hold it, and lift a further 20%."
+        case .natural: return "Hold the singer's tone, judged from the whole mix."
+        case .split: return "Separate the voice out and hold its tone on its own. "
+                + "Needs the model, and runs it even for a full mix."
         }
     }
 
@@ -56,11 +55,11 @@ enum FormantMode: String, CaseIterable {
     var over: Double? {
         switch self {
         case .off: return nil
-        case .natural: return 1.0
-        case .lift10: return 1.1
-        case .lift20: return 1.2
+        case .natural, .split: return 1.0
         }
     }
+
+    var isSplit: Bool { self == .split }
 }
 
 /// Named stem sets. These are *shortcuts*, not a separate mode: the truth is
@@ -180,8 +179,10 @@ final class AudioController {
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
-        formantMode = defaults.string(forKey: Self.formantKey)
-            .flatMap(FormantMode.init(rawValue:)) ?? .natural
+        formantMode = ProcessInfo.processInfo.environment["TRANSPOSIFY_FORMANT"]
+            .flatMap(FormantMode.init(rawValue:))
+            ?? defaults.string(forKey: Self.formantKey)
+                .flatMap(FormantMode.init(rawValue:)) ?? .natural
         knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
         let available = (1 << knownStemCount) - 1
         // The mask is the whole of the saved state. `isolateTrack` is the older
@@ -253,7 +254,7 @@ final class AudioController {
     /// True while the model is still loading and "Best" is selected — the UI
     /// shows this rather than looking broken during a cold load.
     /// The model is only needed when some stem is actually being dropped.
-    var needsModel: Bool { !currentSelection.isPassthrough }
+    var needsModel: Bool { !currentSelection.isPassthrough || formantMode.isSplit }
 
     var preparingModel: Bool { needsModel && modelLoader.isLoading }
     var modelReadyForSimulation: Bool { modelLoader.model != nil }
@@ -501,9 +502,16 @@ final class AudioController {
     func setSemitones(_ value: Int) {
         let clamped = max(-12, min(12, value))
         guard clamped != semitones else { return }
+        let wasSplit = splitActive
         pendingSemitones = nil          // the user is taking over: apply now
         semitones = clamped
         engine?.semitones = clamped
+        // Split only exists while the key is actually moving, so crossing zero
+        // adds or removes the vocal path, which is built at engage.
+        if splitActive != wasSplit {
+            applySelection()
+            if engaged { reconfigure() }
+        }
         persistIfRemembering()
         updateEngagement()
         onChange?()
@@ -550,17 +558,26 @@ final class AudioController {
         defaults.set(stemCount, forKey: Self.stemMaskCountKey)
     }
 
+    /// True when the vocal is pitched on its own path. It needs the model and
+    /// a key change to be worth anything, and falls back quietly without them.
+    var splitActive: Bool {
+        formantMode.isSplit && SeparationModel.isInstalled && semitones != 0
+    }
+
     /// What the worker should emit.
     private var currentSelection: StemSelection {
         let available = (1 << stemCount) - 1
         let mask = stemMask & available
         // Everything selected is the untouched mix, which passthrough gives
-        // bit-exact and without running the model at all.
-        return mask == available ? .passthrough : .stems(mask: mask)
+        // bit-exact and without running the model at all — unless the vocal
+        // has to come out separately, which takes a prediction.
+        if mask == available { return splitActive ? .stems(mask: mask) : .passthrough }
+        return .stems(mask: mask)
     }
 
     private func applySelection() {
         separation?.setSelection(currentSelection)
+        separation?.setSplitVocal(splitActive)
         recorder?.selection(stemMask: stemMask, passthrough: currentSelection.isPassthrough)
     }
 
@@ -604,10 +621,19 @@ final class AudioController {
 
     func setFormantMode(_ mode: FormantMode) {
         guard mode != formantMode else { return }
+        let wasSplit = splitActive
         formantMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.formantKey)
-        engine?.formantOver = mode.over
         log.notice("formant mode \(mode.rawValue, privacy: .public)")
+        if splitActive != wasSplit {
+            // The vocal path is built at engage, so turning it on or off
+            // rebuilds the pipeline. Everything else applies in place.
+            if needsModel { modelLoader.prepare() }
+            applySelection()
+            if engaged { reconfigure() } else { updateEngagement() }
+        } else {
+            engine?.formantOver = mode.over
+        }
         onChange?()
     }
 
@@ -867,6 +893,7 @@ final class AudioController {
                 (inference \(String(format: "%.0f", (SeparationModelLoader.measuredInference ?? 0) * 1000), privacy: .public) ms)
                 """)
             separation.setSelection(currentSelection)
+            separation.setSplitVocal(splitActive)
             separation.start()
             self.separation = separation
             let sourceRing = separation.outputRing
@@ -888,6 +915,7 @@ final class AudioController {
 
             let engine = PitchEngine(sampleRate: capture.sampleRate,
                                      channels: capture.channelCount, ring: sourceRing,
+                                     vocalRing: splitActive ? separation.vocalRing : nil,
                                      recorder: recorder, manualRendering: simulationMode)
             engine.semitones = semitones
             engine.formantOver = formantMode.over

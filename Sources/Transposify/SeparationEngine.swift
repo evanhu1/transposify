@@ -232,6 +232,11 @@ final class SeparationEngine {
 
     private let inputRing: RingBuffer      // from AudioCapture, interleaved @ captureRate
     let outputRing: RingBuffer             // to PitchEngine, interleaved @ captureRate
+    /// The vocal, kept apart so it can be pitched with its formants held while
+    /// the rest of the mix is pitched normally. Written in the same call as
+    /// `outputRing` and always with the same frame count, so the two never
+    /// slide against each other. Silent unless `setSplitVocal(true)`.
+    let vocalRing: RingBuffer
     private let captureRate: Double
     private let channels: Int
 
@@ -245,6 +250,8 @@ final class SeparationEngine {
     private let downR: Resampler
     private let upL: Resampler
     private let upR: Resampler
+    private let upVL: Resampler
+    private let upVR: Resampler
 
     // Preallocated conversion buffers; the worker reuses them every step.
     private let readFrames: Int             // capture frames per drain pass
@@ -252,6 +259,8 @@ final class SeparationEngine {
     private var planeScratch: [Float]
     private var outL: [Float] = []
     private var outR: [Float] = []
+    private var outVL: [Float] = []
+    private var outVR: [Float] = []
 
     private let ramp: [Float]              // raised cosine, `rampFrames` long
 
@@ -273,6 +282,11 @@ final class SeparationEngine {
     private var carryR: [Float]
     private var emitL: [Float]
     private var emitR: [Float]
+    private var carryVL: [Float]
+    private var carryVR: [Float]
+    private var emitVL: [Float]
+    private var emitVR: [Float]
+    private let splitVocal = Flag(false)
     private var stepPredicted = false
     /// How long the last step's prediction took, so the recorder can tell
     /// model time from the window slide, the gather and the resampling.
@@ -310,6 +324,13 @@ final class SeparationEngine {
     /// next hop comes out changed and the raised-cosine crossfade joins it to
     /// the previous one. No rebuild, no re-prime, no gap.
     func setSelection(_ selection: StemSelection) { selectionBox.set(selection) }
+
+    /// Publish the vocal separately from the rest of the mix.
+    ///
+    /// Costs a prediction even when every stem is wanted — there is no vocal
+    /// to hand over without one — so the controller only asks for it when the
+    /// pitch shifter is going to treat the two differently.
+    func setSplitVocal(_ on: Bool) { splitVocal.set(on) }
 
     /// Hand over the model once it finishes loading. Until then the worker runs
     /// passthrough, so audio keeps playing and the switch to separated output
@@ -402,10 +423,13 @@ final class SeparationEngine {
         featureProvider = try MLDictionaryFeatureProvider(
             dictionary: [Self.inputFeature: inputArray])
 
+        vocalRing = RingBuffer(capacityFloats: Int(captureRate * 4.0) * max(1, min(2, channels)))
         downL = Resampler(inRate: captureRate, outRate: Self.modelRate)
         downR = Resampler(inRate: captureRate, outRate: Self.modelRate)
         upL = Resampler(inRate: Self.modelRate, outRate: captureRate)
         upR = Resampler(inRate: Self.modelRate, outRate: captureRate)
+        upVL = Resampler(inRate: Self.modelRate, outRate: captureRate)
+        upVR = Resampler(inRate: Self.modelRate, outRate: captureRate)
 
         // One drain pass takes at most this much; the capture ring holds
         // ~0.5 s, so this is never the limit.
@@ -421,6 +445,10 @@ final class SeparationEngine {
         carryR = [Float](repeating: 0, count: n)
         emitL = [Float](repeating: 0, count: hopFrames + n)
         emitR = [Float](repeating: 0, count: hopFrames + n)
+        carryVL = [Float](repeating: 0, count: n)
+        carryVR = [Float](repeating: 0, count: n)
+        emitVL = [Float](repeating: 0, count: hopFrames + n)
+        emitVR = [Float](repeating: 0, count: hopFrames + n)
         stagingL.reserveCapacity(Int(Self.modelRate) * 4)
         stagingR.reserveCapacity(Int(Self.modelRate) * 4)
     }
@@ -570,6 +598,7 @@ final class SeparationEngine {
             }
             if stepPredicted && separated == nil { return }
             buildEmitRegion(from: separated, selection: selection)
+            if splitVocal.get() { buildVocalRegion(from: separated, selection: selection) }
             publish()
         }
         return true
@@ -616,6 +645,28 @@ final class SeparationEngine {
     /// Sum the non-vocal stems over the emit region, apply the crossfade
     /// envelope, and overlap-add the previous window's tail.
     private func buildEmitRegion(from sources: MLMultiArray?, selection: StemSelection) {
+        buildRegion(from: sources, selection: selection,
+                    emitL: &emitL, emitR: &emitR, carryL: &carryL, carryR: &carryR)
+    }
+
+    /// The vocal on its own, through the same window, ramp and overlap-add as
+    /// the main stream so the two stay sample-aligned when they are summed
+    /// again after pitch shifting. Silence when there is nothing to separate.
+    private func buildVocalRegion(from sources: MLMultiArray?, selection: StemSelection) {
+        let mask = 1 << Stem.vocalsIndex
+        let wanted: StemSelection
+        if case .stems(let m) = selection, m & mask != 0, sources != nil {
+            wanted = .stems(mask: mask)
+        } else {
+            wanted = .stems(mask: 0)          // nothing to take: silence
+        }
+        buildRegion(from: sources, selection: wanted,
+                    emitL: &emitVL, emitR: &emitVR, carryL: &carryVL, carryR: &carryVR)
+    }
+
+    private func buildRegion(from sources: MLMultiArray?, selection: StemSelection,
+                             emitL: inout [Float], emitR: inout [Float],
+                             carryL: inout [Float], carryR: inout [Float]) {
         let elen = emitFrames
         let start = pastFrames - crossfadeFrames
         let n = rampFrames
@@ -716,7 +767,20 @@ final class SeparationEngine {
         emitR.withUnsafeBufferPointer { upR.process($0.baseAddress!, count: hopFrames, into: &outR) }
         // Both resamplers advance by the same step, so the counts agree; the
         // minimum is only a guard.
-        let n = min(outL.count, outR.count)
+        var n = min(outL.count, outR.count)
+
+        // The vocal goes through its own resamplers, which have consumed the
+        // same input at the same rate, so it produces the same count. Publish
+        // whichever is smaller to both rings rather than letting them differ
+        // by even one frame.
+        let split = splitVocal.get()
+        if split {
+            outVL.removeAll(keepingCapacity: true)
+            outVR.removeAll(keepingCapacity: true)
+            emitVL.withUnsafeBufferPointer { upVL.process($0.baseAddress!, count: hopFrames, into: &outVL) }
+            emitVR.withUnsafeBufferPointer { upVR.process($0.baseAddress!, count: hopFrames, into: &outVR) }
+            n = min(n, min(outVL.count, outVR.count))
+        }
         guard n > 0 else { return }
         let count = n * channels
         if interleaveScratch.count < count {
@@ -734,6 +798,21 @@ final class SeparationEngine {
                 }
             }
             outputRing.write(dst.baseAddress!, count: count)
+        }
+        if split {
+            interleaveScratch.withUnsafeMutableBufferPointer { dst in
+                var f = 0
+                if channels == 1 {
+                    while f < n { dst[f] = outVL[f]; f += 1 }
+                } else {
+                    while f < n {
+                        dst[f * channels] = outVL[f]
+                        dst[f * channels + 1] = outVR[f]
+                        f += 1
+                    }
+                }
+                vocalRing.write(dst.baseAddress!, count: count)
+            }
         }
         publishedCounter.add(n)
     }

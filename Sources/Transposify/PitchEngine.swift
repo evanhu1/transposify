@@ -41,16 +41,25 @@ final class PitchEngine {
     private static let maxBlock = 8192
 
     private let ring: RingBuffer
+    /// The vocal on its own, when the caller wants it shifted with its
+    /// formants held while the rest of the mix is shifted normally.
+    private let vocalRing: RingBuffer?
     private let channels: Int
     private let sampleRate: Double
     private let recorder: SessionRecorder?
     private let manualRendering: Bool
 
     private var rb: OpaquePointer?
+    private var rbVocal: OpaquePointer?
     private var channelBuffers: [UnsafeMutablePointer<Float>]
     private let inputPtrs: UnsafeMutablePointer<UnsafePointer<Float>?>
     private let outputPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private let readScratch: UnsafeMutablePointer<Float>
+    private let vocalRead: UnsafeMutablePointer<Float>
+    private var vocalIn: [UnsafeMutablePointer<Float>]
+    private var vocalOut: [UnsafeMutablePointer<Float>]
+    private let vocalInPtrs: UnsafeMutablePointer<UnsafePointer<Float>?>
+    private let vocalOutPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private var manualOutputBuffers: [UnsafeMutablePointer<Float>] = []
     private typealias RenderCore = (
         UnsafeMutablePointer<ObjCBool>, Int,
@@ -119,7 +128,9 @@ final class PitchEngine {
     var onConfigurationChange: (() -> Void)?
 
     init(sampleRate: Double, channels: Int, ring: RingBuffer,
+         vocalRing: RingBuffer? = nil,
          recorder: SessionRecorder? = nil, manualRendering: Bool = false) {
+        self.vocalRing = vocalRing
         self.sampleRate = sampleRate
         self.channels = max(1, channels)
         self.ring = ring
@@ -130,6 +141,15 @@ final class PitchEngine {
         inputPtrs = .allocate(capacity: ch)
         outputPtrs = .allocate(capacity: ch)
         readScratch = .allocate(capacity: Self.maxBlock * ch)
+        vocalRead = .allocate(capacity: Self.maxBlock * ch)
+        vocalIn = (0..<ch).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: Self.maxBlock) }
+        vocalOut = (0..<ch).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: Self.maxBlock) }
+        vocalInPtrs = .allocate(capacity: ch)
+        vocalOutPtrs = .allocate(capacity: ch)
+        for c in 0..<ch {
+            vocalInPtrs[c] = UnsafePointer(vocalIn[c])
+            vocalOutPtrs[c] = vocalOut[c]
+        }
         for c in 0..<ch { inputPtrs[c] = UnsafePointer(channelBuffers[c]) }
         if manualRendering {
             manualOutputBuffers = (0..<ch).map { _ in .allocate(capacity: Self.maxBlock) }
@@ -141,6 +161,11 @@ final class PitchEngine {
         inputPtrs.deallocate()
         outputPtrs.deallocate()
         readScratch.deallocate()
+        vocalRead.deallocate()
+        vocalIn.forEach { $0.deallocate() }
+        vocalOut.forEach { $0.deallocate() }
+        vocalInPtrs.deallocate()
+        vocalOutPtrs.deallocate()
         manualOutputBuffers.forEach { $0.deallocate() }
     }
 
@@ -345,6 +370,10 @@ final class PitchEngine {
             renderCore = nil
             rubberband_delete(state)
             rb = nil
+        }
+        if let state = rbVocal {
+            rubberband_delete(state)
+            rbVocal = nil
         }
     }
 }
