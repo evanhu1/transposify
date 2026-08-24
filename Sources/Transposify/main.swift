@@ -16,6 +16,9 @@ if ProcessInfo.processInfo.environment["TRANSPOSIFY_UNREGISTER_LOGIN"] == "1" {
 if let spec = ProcessInfo.processInfo.environment["TRANSPOSIFY_SIMULATE"] {
     PacedSimulator.run(spec)
 }
+if let spec = ProcessInfo.processInfo.environment["TRANSPOSIFY_PITCH_FILE"] {
+    PitchFileTest.run(spec)
+}
 if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_PREDICT_BENCH"] {
     PredictBench.run(path)
 }

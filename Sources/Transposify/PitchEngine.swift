@@ -32,6 +32,7 @@ final class PitchEngine {
     private static let optionProcessRealTime: Int32 = 0x0000_0001
     private static let optionPitchHighQuality: Int32 = 0x0200_0000
     private static let optionEngineFiner: Int32 = 0x2000_0000 // R3
+    private static let optionFormantPreserved: Int32 = 0x0100_0000
 
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
@@ -64,6 +65,7 @@ final class PitchEngine {
     }
     private let holdFlag = AtomicInt(0)
     private let timeRatioMilli = AtomicInt(1000)
+    private let formantFlag = AtomicInt(1)
     private let underrunCount = AtomicInt(0)
 
     /// Render pulls that came up short — the output ring ran dry. Any non-zero
@@ -83,6 +85,18 @@ final class PitchEngine {
     /// render callback reads it atomically.
     var timeRatio: Double = 1.0 {
         didSet { timeRatioMilli.set(Int((max(0.9, min(1.0, timeRatio)) * 1000).rounded())) }
+    }
+
+    /// Hold the vocal formants where they were instead of letting them move
+    /// with the pitch.
+    ///
+    /// Shifting a voice down moves its whole spectral envelope down with it,
+    /// which is what makes a singer sound like a much larger one. Rubber Band
+    /// can estimate that envelope and put it back, so the note changes and the
+    /// voice does not. Costs about 8% more processing and is safe to change
+    /// mid-stream.
+    var preserveFormants: Bool = true {
+        didSet { formantFlag.set(preserveFormants ? 1 : 0) }
     }
 
     /// While held, the render callback outputs silence *without draining the
@@ -129,7 +143,8 @@ final class PitchEngine {
             channels: AVAudioChannelCount(channels))
         else { throw NSError(domain: "Transposify", code: -1) }
 
-        let options = Self.optionProcessRealTime | Self.optionEngineFiner | Self.optionPitchHighQuality
+        var options = Self.optionProcessRealTime | Self.optionEngineFiner | Self.optionPitchHighQuality
+        if preserveFormants { options |= Self.optionFormantPreserved }
         let initialScale = pow(2.0, Double(targetSemitones.get()) / 12.0)
         guard let state = rubberband_new(UInt32(sampleRate), UInt32(channels),
                                          options, 1.0, initialScale) else {
@@ -149,6 +164,9 @@ final class PitchEngine {
         let appliedSemitones = IntBox()
         let timeRatioMilli = self.timeRatioMilli
         let appliedRatioMilli = IntBox()
+        let formantFlag = self.formantFlag
+        let appliedFormant = IntBox()
+        appliedFormant.value = preserveFormants ? 1 : 0
         let holdFlag = self.holdFlag
         let underrunCount = self.underrunCount
         let holdGain = FloatBox()
@@ -181,6 +199,13 @@ final class PitchEngine {
             if ratioMilli != appliedRatioMilli.value {
                 appliedRatioMilli.value = ratioMilli
                 rubberband_set_time_ratio(state, Double(ratioMilli) / 1000)
+            }
+
+            let formant = formantFlag.get()
+            if formant != appliedFormant.value {
+                appliedFormant.value = formant
+                rubberband_set_formant_option(
+                    state, formant == 1 ? Self.optionFormantPreserved : 0)
             }
 
             // Feed Rubber Band from the ring until it can produce a full buffer

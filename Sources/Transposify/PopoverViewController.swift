@@ -108,6 +108,7 @@ final class PopoverViewController: NSViewController {
     private let downloadButton = NSButton()
     private lazy var downloadPill = NSStackView(views: [downloadButton])
     private let rememberSwitch = NSSwitch()
+    private let formantSwitch = NSSwitch()
     private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private var minusButton: NSButton!
@@ -283,6 +284,7 @@ final class PopoverViewController: NSViewController {
 
         // Toggles ----------------------------------------------------------
         configure(rememberSwitch, #selector(rememberToggled))
+        configure(formantSwitch, #selector(formantToggled))
         loginCheckbox.controlSize = .small
         loginCheckbox.focusRingType = .none
         loginCheckbox.target = self
@@ -384,6 +386,9 @@ final class PopoverViewController: NSViewController {
         noticeRow.spacing = 8
         modelRow = noticeRow
 
+        let formantRow = toggleRow("Keep voices natural", formantSwitch,
+                                   tooltip: "Move the notes without moving the singer's tone. "
+                                       + "Off, a voice shifted down sounds like a larger one.")
         let rememberRow = toggleRow("Remember key for this song", rememberSwitch,
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
 
@@ -402,7 +407,7 @@ final class PopoverViewController: NSViewController {
         let divider2 = separator()
         let stack = NSStackView(views: [
             nowHeader, divider1,
-            header, sliderRow,
+            header, sliderRow, formantRow,
             karaokeRow, modelRow, rememberRow,
             divider2, footer,
         ])
@@ -414,7 +419,8 @@ final class PopoverViewController: NSViewController {
         stack.setCustomSpacing(14, after: nowHeader)
         stack.setCustomSpacing(14, after: divider1)
         stack.setCustomSpacing(8, after: header)
-        stack.setCustomSpacing(18, after: sliderRow)
+        stack.setCustomSpacing(14, after: sliderRow)
+        stack.setCustomSpacing(18, after: formantRow)
         stack.setCustomSpacing(14, after: rememberRow)
         stack.setCustomSpacing(9, after: divider2)
 
@@ -427,7 +433,7 @@ final class PopoverViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        let fullWidth: [NSView] = [nowHeader, divider1, header, sliderRow, karaokeRow,
+        let fullWidth: [NSView] = [nowHeader, divider1, header, sliderRow, formantRow, karaokeRow,
                                    modelRow, rememberRow, divider2, footer]
         for v in fullWidth {
             v.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -436,7 +442,7 @@ final class PopoverViewController: NSViewController {
         titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artwork.onChange = { [weak self] in self?.refresh() }
-        inactiveWhenOff = [header, sliderRow, karaokeRow, rememberRow]
+        inactiveWhenOff = [header, sliderRow, formantRow, karaokeRow, rememberRow]
         view = container
     }
 
@@ -510,6 +516,8 @@ final class PopoverViewController: NSViewController {
         }
         refreshModelRow()
         updatePreferredSize()
+        formantSwitch.state = controller.preserveFormants ? .on : .off
+        formantSwitch.isEnabled = controller.enabled
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = controller.enabled && (spotify.current != nil)
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
@@ -769,6 +777,10 @@ final class PopoverViewController: NSViewController {
         guard let preset = presetChips.first(where: { $0.value === sender })?.key
         else { return }
         controller.setPreset(preset)
+    }
+
+    @objc private func formantToggled() {
+        controller.setPreserveFormants(formantSwitch.state == .on)
     }
 
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
