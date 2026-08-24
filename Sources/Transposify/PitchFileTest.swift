@@ -103,10 +103,15 @@ enum PitchFileTest {
                 AVLinearPCMBitDepthKey: 32,
                 AVLinearPCMIsFloatKey: true,
             ]
-            let output = try AVAudioFile(forWriting: URL(fileURLWithPath: parts[1]),
-                                         settings: settings,
-                                         commonFormat: .pcmFormatFloat32, interleaved: false)
-            try output.write(from: writeBuf)
+            // Held optionally and released explicitly: AVAudioFile finalises the
+            // WAV header when it deinits, and `exit` below does not run deinits.
+            // Without this the file carries every sample and a header saying it
+            // is empty.
+            var output: AVAudioFile? = try AVAudioFile(
+                forWriting: URL(fileURLWithPath: parts[1]), settings: settings,
+                commonFormat: .pcmFormatFloat32, interleaved: false)
+            try output?.write(from: writeBuf)
+            output = nil
 
             let mode = formantScale > 0
                 ? String(format: "formant scale %.2f", formantScale)
