@@ -24,6 +24,45 @@ enum Stem: Int, CaseIterable {
     }
 }
 
+/// What to do with the singer's formants when the key moves.
+///
+/// Shifting a voice down carries its whole spectral envelope down with it,
+/// which is why a pitched-down singer sounds like a larger one. Rubber Band
+/// can estimate that envelope and hold it in place — and, past that, lift it
+/// further, which is worth a try because the estimate comes from the whole
+/// mix rather than the voice alone and tends to under-correct.
+enum FormantMode: String, CaseIterable {
+    case off, natural, lift10, lift20
+
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .natural: return "Natural"
+        case .lift10: return "+10%"
+        case .lift20: return "+20%"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .off: return "Let the voice move with the key. Lower sounds larger."
+        case .natural: return "Hold the singer's tone where it was."
+        case .lift10: return "Hold it, and lift a further 10%."
+        case .lift20: return "Hold it, and lift a further 20%."
+        }
+    }
+
+    /// nil lets the formants move with the pitch.
+    var over: Double? {
+        switch self {
+        case .off: return nil
+        case .natural: return 1.0
+        case .lift10: return 1.1
+        case .lift20: return 1.2
+        }
+    }
+}
+
 /// Named stem sets. These are *shortcuts*, not a separate mode: the truth is
 /// always the stem mask, and a preset is simply the name of a common one. Any
 /// other mask is unnamed, which is why `preset` is optional rather than having
@@ -62,9 +101,9 @@ final class AudioController {
     private(set) var semitones = 0
     private(set) var rememberThisSong = true
 
-    /// Keep the singer sounding like themselves when the key moves. Persisted;
-    /// see `PitchEngine.preserveFormants` for what it does.
-    private(set) var preserveFormants: Bool
+    /// How much of the singer's tone to hold on to when the key moves.
+    /// Persisted; see `PitchEngine.formantOver` for what each one does.
+    private(set) var formantMode: FormantMode
     private(set) var engaged = false
 
     /// Global on/off. When off, the pipeline never engages and Spotify plays
@@ -132,7 +171,7 @@ final class AudioController {
     private static let reductionKey = "vocalReduction"        // legacy string
     private static let isolateKey = "isolateTrack"       // legacy, read once
     private static let advancedKey = "advancedStems"     // legacy Bool, unused
-    private static let formantKey = "preserveFormants"
+    private static let formantKey = "formantMode"
     private static let stemMaskKey = "stemMask"
     private static let stemMaskCountKey = "stemMaskCount"
 
@@ -141,9 +180,8 @@ final class AudioController {
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
-        preserveFormants = defaults.object(forKey: Self.formantKey) == nil
-            ? true
-            : defaults.bool(forKey: Self.formantKey)
+        formantMode = defaults.string(forKey: Self.formantKey)
+            .flatMap(FormantMode.init(rawValue:)) ?? .natural
         knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
         let available = (1 << knownStemCount) - 1
         // The mask is the whole of the saved state. `isolateTrack` is the older
@@ -564,12 +602,12 @@ final class AudioController {
         onChange?()
     }
 
-    func setPreserveFormants(_ on: Bool) {
-        guard on != preserveFormants else { return }
-        preserveFormants = on
-        UserDefaults.standard.set(on, forKey: Self.formantKey)
-        engine?.preserveFormants = on
-        log.notice("formants \(on ? "preserved" : "shifted", privacy: .public)")
+    func setFormantMode(_ mode: FormantMode) {
+        guard mode != formantMode else { return }
+        formantMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.formantKey)
+        engine?.formantOver = mode.over
+        log.notice("formant mode \(mode.rawValue, privacy: .public)")
         onChange?()
     }
 
@@ -852,7 +890,7 @@ final class AudioController {
                                      channels: capture.channelCount, ring: sourceRing,
                                      recorder: recorder, manualRendering: simulationMode)
             engine.semitones = semitones
-            engine.preserveFormants = preserveFormants
+            engine.formantOver = formantMode.over
             engine.onConfigurationChange = { [weak self] in self?.reconfigure() }
             // Hold output until a cushion of audio exists. Releasing as soon as
             // the ring is merely non-empty leaves no floor, so every hiccup —

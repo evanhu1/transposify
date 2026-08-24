@@ -108,7 +108,7 @@ final class PopoverViewController: NSViewController {
     private let downloadButton = NSButton()
     private lazy var downloadPill = NSStackView(views: [downloadButton])
     private let rememberSwitch = NSSwitch()
-    private let formantSwitch = NSSwitch()
+    private var formantChips: [FormantMode: MixChip] = [:]
     private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private var minusButton: NSButton!
@@ -284,7 +284,6 @@ final class PopoverViewController: NSViewController {
 
         // Toggles ----------------------------------------------------------
         configure(rememberSwitch, #selector(rememberToggled))
-        configure(formantSwitch, #selector(formantToggled))
         loginCheckbox.controlSize = .small
         loginCheckbox.focusRingType = .none
         loginCheckbox.target = self
@@ -386,9 +385,29 @@ final class PopoverViewController: NSViewController {
         noticeRow.spacing = 8
         modelRow = noticeRow
 
-        let formantRow = toggleRow("Keep voices natural", formantSwitch,
-                                   tooltip: "Move the notes without moving the singer's tone. "
-                                       + "Off, a voice shifted down sounds like a larger one.")
+        // Voice tone: the same chip row the Mix section uses, because it is
+        // the same kind of choice — one of a few named settings.
+        let formantTitle = NSTextField(labelWithString: "Voice tone")
+        formantTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        formantTitle.textColor = .secondaryLabelColor
+        var fChips: [NSView] = []
+        for mode in FormantMode.allCases {
+            let chip = MixChip(title: mode.title, target: self,
+                               action: #selector(formantTapped(_:)))
+            chip.toolTip = mode.summary
+            formantChips[mode] = chip
+            fChips.append(chip)
+        }
+        let fSpacer = NSView()
+        fSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let fChipRow = NSStackView(views: fChips + [fSpacer])
+        fChipRow.orientation = .horizontal
+        fChipRow.alignment = .centerY
+        fChipRow.spacing = 6
+        let formantRow = NSStackView(views: [formantTitle, fChipRow])
+        formantRow.orientation = .vertical
+        formantRow.alignment = .leading
+        formantRow.spacing = 8
         let rememberRow = toggleRow("Remember key for this song", rememberSwitch,
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
 
@@ -516,8 +535,10 @@ final class PopoverViewController: NSViewController {
         }
         refreshModelRow()
         updatePreferredSize()
-        formantSwitch.state = controller.preserveFormants ? .on : .off
-        formantSwitch.isEnabled = controller.enabled
+        for (mode, chip) in formantChips {
+            chip.lit = (controller.formantMode == mode)
+            chip.isEnabled = controller.enabled
+        }
         rememberSwitch.state = controller.rememberThisSong ? .on : .off
         rememberSwitch.isEnabled = controller.enabled && (spotify.current != nil)
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
@@ -779,8 +800,9 @@ final class PopoverViewController: NSViewController {
         controller.setPreset(preset)
     }
 
-    @objc private func formantToggled() {
-        controller.setPreserveFormants(formantSwitch.state == .on)
+    @objc private func formantTapped(_ sender: MixChip) {
+        guard let mode = formantChips.first(where: { $0.value === sender })?.key else { return }
+        controller.setFormantMode(mode)
     }
 
     @objc private func rememberToggled() { controller.setRemember(rememberSwitch.state == .on) }
