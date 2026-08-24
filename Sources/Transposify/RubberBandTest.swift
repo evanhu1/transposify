@@ -10,7 +10,6 @@ enum RubberBandTest {
         func emit(_ s: String) { err.write((s + "\n").data(using: .utf8)!) }
 
         reportLatency(emit)
-        reportLockstep(emit)
         reportTimeRatio(emit)
 
         let sr = 48_000
@@ -77,65 +76,6 @@ enum RubberBandTest {
         emit(String(format: "RBTEST: 440Hz +7st -> expected %.1fHz, measured %.1fHz (err %.2f%%, %d samples) -> %@",
                     expectedHz, measured, relErr * 100, output.count, pass ? "PASS" : "FAIL"))
         exit(pass ? 0 : 1)
-    }
-
-    /// Two stretchers, identical but for formant handling, fed the same input:
-    /// do they hand back the same number of samples every time?
-    ///
-    /// This is what makes a split vocal/instrumental path possible. If the two
-    /// ever disagree the streams slide apart and comb-filter against each
-    /// other, which would be far worse than the tone problem being fixed.
-    private static func reportLockstep(_ emit: (String) -> Void) {
-        let sr: UInt32 = 48_000
-        let realTime: Int32 = 0x0000_0001
-        let finer: Int32 = 0x2000_0000
-        let hq: Int32 = 0x0200_0000
-        let preserved: Int32 = 0x0100_0000
-        let scale = pow(2.0, -4.0 / 12.0)
-        guard let a = rubberband_new(sr, 2, realTime | finer | hq | preserved, 1.0, scale),
-              let b = rubberband_new(sr, 2, realTime | finer | hq, 1.0, scale)
-        else { emit("LOCKSTEP: FAIL — could not create stretchers"); return }
-        let block = 512
-        rubberband_set_max_process_size(a, UInt32(block))
-        rubberband_set_max_process_size(b, UInt32(block))
-
-        let bufs = (0..<2).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: block) }
-        let inPtrs = UnsafeMutablePointer<UnsafePointer<Float>?>.allocate(capacity: 2)
-        let outA = (0..<2).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: block) }
-        let outB = (0..<2).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: block) }
-        let outAP = UnsafeMutablePointer<UnsafeMutablePointer<Float>?>.allocate(capacity: 2)
-        let outBP = UnsafeMutablePointer<UnsafeMutablePointer<Float>?>.allocate(capacity: 2)
-        defer {
-            bufs.forEach { $0.deallocate() }; outA.forEach { $0.deallocate() }
-            outB.forEach { $0.deallocate() }
-            inPtrs.deallocate(); outAP.deallocate(); outBP.deallocate()
-        }
-        for c in 0..<2 { inPtrs[c] = UnsafePointer(bufs[c]); outAP[c] = outA[c]; outBP[c] = outB[c] }
-
-        var phase = 0.0
-        var totalA = 0, totalB = 0, disagreements = 0, worst = 0
-        for _ in 0..<400 {
-            for i in 0..<block {
-                let v = Float(sin(phase) * 0.5); phase += 2 * Double.pi * 220 / 48_000
-                bufs[0][i] = v; bufs[1][i] = v
-            }
-            rubberband_process(a, UnsafePointer(inPtrs), UInt32(block), 0)
-            rubberband_process(b, UnsafePointer(inPtrs), UInt32(block), 0)
-            let availA = Int(rubberband_available(a)), availB = Int(rubberband_available(b))
-            if availA != availB {
-                disagreements += 1
-                worst = max(worst, abs(availA - availB))
-            }
-            let want = min(min(availA, availB), block)
-            if want > 0 {
-                totalA += Int(rubberband_retrieve(a, UnsafePointer(outAP), UInt32(want)))
-                totalB += Int(rubberband_retrieve(b, UnsafePointer(outBP), UInt32(want)))
-            }
-        }
-        rubberband_delete(a); rubberband_delete(b)
-        emit("LOCKSTEP: 400 blocks, retrieved \(totalA) vs \(totalB), "
-             + "availability differed \(disagreements) times (worst \(worst) samples) -> "
-             + (totalA == totalB && worst == 0 ? "IN STEP" : "DRIFTS"))
     }
 
     /// The depth governor drives `rubberband_set_time_ratio` on a live stream,

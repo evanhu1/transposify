@@ -10,13 +10,8 @@ import CRubberBand
 ///     TRANSPOSIFY_PITCH_FORMANT=preserve   .build/release/Transposify
 ///
 /// `TRANSPOSIFY_PITCH_FORMANT` is `shift` (the default, formants move with the
-/// pitch) or `preserve`.
-///
-/// `TRANSPOSIFY_PITCH_FORMANT_OVER` goes past preservation: 1.0 is exactly
-/// preserved, 1.1 lifts the formants a further 10%. Prefer it to
-/// `TRANSPOSIFY_PITCH_FORMANT_SCALE`, which is Rubber Band's raw ratio and is
-/// easy to get backwards — there, 1.0 means *unaffected*, i.e. formants move
-/// with the pitch, and preservation is 1.0 / pitchScale (1.26 at -4 st).
+/// pitch) or `preserve`. `TRANSPOSIFY_PITCH_FORMANT_SCALE` sets an explicit
+/// formant ratio instead, where 1.0 holds the formants exactly where they were.
 enum PitchFileTest {
     static func run(_ spec: String) -> Never {
         let err = FileHandle.standardError
@@ -29,11 +24,7 @@ enum PitchFileTest {
         let env = ProcessInfo.processInfo.environment
         let semitones = Double(env["TRANSPOSIFY_PITCH_SEMITONES"] ?? "-4") ?? -4
         let preserve = (env["TRANSPOSIFY_PITCH_FORMANT"] ?? "shift") == "preserve"
-        var formantScale = Double(env["TRANSPOSIFY_PITCH_FORMANT_SCALE"] ?? "0") ?? 0
-        let pitchScale = pow(2.0, semitones / 12.0)
-        if let over = Double(env["TRANSPOSIFY_PITCH_FORMANT_OVER"] ?? "") {
-            formantScale = over / pitchScale
-        }
+        let formantScale = Double(env["TRANSPOSIFY_PITCH_FORMANT_SCALE"] ?? "0") ?? 0
 
         do {
             let input = try AVAudioFile(forReading: URL(fileURLWithPath: parts[0]))
@@ -52,7 +43,7 @@ enum PitchFileTest {
             var options: Int32 = 0x0000_0001 | 0x2000_0000 | 0x0200_0000
             if preserve { options |= 0x0100_0000 }
             guard let rb = rubberband_new(UInt32(rate), UInt32(channels), options,
-                                          1.0, pitchScale)
+                                          1.0, pow(2.0, semitones / 12.0))
             else { emit("FAIL  could not create the stretcher"); exit(1) }
             if formantScale > 0 { rubberband_set_formant_scale(rb, formantScale) }
             let block = 1024

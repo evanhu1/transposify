@@ -41,25 +41,16 @@ final class PitchEngine {
     private static let maxBlock = 8192
 
     private let ring: RingBuffer
-    /// The vocal on its own, when the caller wants it shifted with its
-    /// formants held while the rest of the mix is shifted normally.
-    private let vocalRing: RingBuffer?
     private let channels: Int
     private let sampleRate: Double
     private let recorder: SessionRecorder?
     private let manualRendering: Bool
 
     private var rb: OpaquePointer?
-    private var rbVocal: OpaquePointer?
     private var channelBuffers: [UnsafeMutablePointer<Float>]
     private let inputPtrs: UnsafeMutablePointer<UnsafePointer<Float>?>
     private let outputPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private let readScratch: UnsafeMutablePointer<Float>
-    private let vocalRead: UnsafeMutablePointer<Float>
-    private var vocalIn: [UnsafeMutablePointer<Float>]
-    private var vocalOut: [UnsafeMutablePointer<Float>]
-    private let vocalInPtrs: UnsafeMutablePointer<UnsafePointer<Float>?>
-    private let vocalOutPtrs: UnsafeMutablePointer<UnsafeMutablePointer<Float>?>
     private var manualOutputBuffers: [UnsafeMutablePointer<Float>] = []
     private typealias RenderCore = (
         UnsafeMutablePointer<ObjCBool>, Int,
@@ -74,9 +65,7 @@ final class PitchEngine {
     }
     private let holdFlag = AtomicInt(0)
     private let timeRatioMilli = AtomicInt(1000)
-    /// Formant handling as thousandths: 0 lets the formants move with the
-    /// pitch, 1000 holds them where they were, 1100 lifts them a further 10%.
-    private let formantOverMilli = AtomicInt(1000)
+    private let formantFlag = AtomicInt(1)
     private let underrunCount = AtomicInt(0)
 
     /// Render pulls that came up short — the output ring ran dry. Any non-zero
@@ -106,13 +95,8 @@ final class PitchEngine {
     /// can estimate that envelope and put it back, so the note changes and the
     /// voice does not. Costs about 8% more processing and is safe to change
     /// mid-stream.
-    /// nil moves the formants with the pitch. 1.0 holds them exactly where
-    /// they were; above that lifts them further, which counteracts whatever
-    /// chestiness the envelope estimate leaves behind.
-    var formantOver: Double? = 1.0 {
-        didSet {
-            formantOverMilli.set(formantOver.map { Int(($0 * 1000).rounded()) } ?? 0)
-        }
+    var preserveFormants: Bool = true {
+        didSet { formantFlag.set(preserveFormants ? 1 : 0) }
     }
 
     /// While held, the render callback outputs silence *without draining the
@@ -128,9 +112,7 @@ final class PitchEngine {
     var onConfigurationChange: (() -> Void)?
 
     init(sampleRate: Double, channels: Int, ring: RingBuffer,
-         vocalRing: RingBuffer? = nil,
          recorder: SessionRecorder? = nil, manualRendering: Bool = false) {
-        self.vocalRing = vocalRing
         self.sampleRate = sampleRate
         self.channels = max(1, channels)
         self.ring = ring
@@ -141,15 +123,6 @@ final class PitchEngine {
         inputPtrs = .allocate(capacity: ch)
         outputPtrs = .allocate(capacity: ch)
         readScratch = .allocate(capacity: Self.maxBlock * ch)
-        vocalRead = .allocate(capacity: Self.maxBlock * ch)
-        vocalIn = (0..<ch).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: Self.maxBlock) }
-        vocalOut = (0..<ch).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: Self.maxBlock) }
-        vocalInPtrs = .allocate(capacity: ch)
-        vocalOutPtrs = .allocate(capacity: ch)
-        for c in 0..<ch {
-            vocalInPtrs[c] = UnsafePointer(vocalIn[c])
-            vocalOutPtrs[c] = vocalOut[c]
-        }
         for c in 0..<ch { inputPtrs[c] = UnsafePointer(channelBuffers[c]) }
         if manualRendering {
             manualOutputBuffers = (0..<ch).map { _ in .allocate(capacity: Self.maxBlock) }
@@ -161,11 +134,6 @@ final class PitchEngine {
         inputPtrs.deallocate()
         outputPtrs.deallocate()
         readScratch.deallocate()
-        vocalRead.deallocate()
-        vocalIn.forEach { $0.deallocate() }
-        vocalOut.forEach { $0.deallocate() }
-        vocalInPtrs.deallocate()
-        vocalOutPtrs.deallocate()
         manualOutputBuffers.forEach { $0.deallocate() }
     }
 
@@ -176,7 +144,7 @@ final class PitchEngine {
         else { throw NSError(domain: "Transposify", code: -1) }
 
         var options = Self.optionProcessRealTime | Self.optionEngineFiner | Self.optionPitchHighQuality
-        if formantOver != nil { options |= Self.optionFormantPreserved }
+        if preserveFormants { options |= Self.optionFormantPreserved }
         let initialScale = pow(2.0, Double(targetSemitones.get()) / 12.0)
         guard let state = rubberband_new(UInt32(sampleRate), UInt32(channels),
                                          options, 1.0, initialScale) else {
@@ -196,8 +164,9 @@ final class PitchEngine {
         let appliedSemitones = IntBox()
         let timeRatioMilli = self.timeRatioMilli
         let appliedRatioMilli = IntBox()
-        let formantOverMilli = self.formantOverMilli
+        let formantFlag = self.formantFlag
         let appliedFormant = IntBox()
+        appliedFormant.value = preserveFormants ? 1 : 0
         let holdFlag = self.holdFlag
         let underrunCount = self.underrunCount
         let holdGain = FloatBox()
@@ -220,36 +189,23 @@ final class PitchEngine {
                 return noErr
             }
 
-            // Pitch and formants are set together: the formant scale is
-            // expressed relative to the pitch scale, so a change in either
-            // one has to recompute it.
             let semis = targetSemitones.get()
-            let over = formantOverMilli.get()
-            if semis != appliedSemitones.value || over != appliedFormant.value {
+            if semis != appliedSemitones.value {
                 appliedSemitones.value = semis
-                appliedFormant.value = over
-                let pitchScale = pow(2.0, Double(semis) / 12.0)
-                rubberband_set_pitch_scale(state, pitchScale)
-                if over == 0 {
-                    // Back to automatic, governed by the option: formants move.
-                    rubberband_set_formant_scale(state, 0)
-                    rubberband_set_formant_option(state, 0)
-                } else if over == 1000 {
-                    // Exactly preserved. Use the option rather than an
-                    // equivalent scale, so this stays the path Rubber Band
-                    // documents for ordinary formant preservation.
-                    rubberband_set_formant_scale(state, 0)
-                    rubberband_set_formant_option(state, Self.optionFormantPreserved)
-                } else {
-                    rubberband_set_formant_option(state, Self.optionFormantPreserved)
-                    rubberband_set_formant_scale(state, Double(over) / 1000 / pitchScale)
-                }
+                rubberband_set_pitch_scale(state, pow(2.0, Double(semis) / 12.0))
             }
 
             let ratioMilli = timeRatioMilli.get()
             if ratioMilli != appliedRatioMilli.value {
                 appliedRatioMilli.value = ratioMilli
                 rubberband_set_time_ratio(state, Double(ratioMilli) / 1000)
+            }
+
+            let formant = formantFlag.get()
+            if formant != appliedFormant.value {
+                appliedFormant.value = formant
+                rubberband_set_formant_option(
+                    state, formant == 1 ? Self.optionFormantPreserved : 0)
             }
 
             // Feed Rubber Band from the ring until it can produce a full buffer
@@ -370,10 +326,6 @@ final class PitchEngine {
             renderCore = nil
             rubberband_delete(state)
             rb = nil
-        }
-        if let state = rbVocal {
-            rubberband_delete(state)
-            rbVocal = nil
         }
     }
 }

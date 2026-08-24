@@ -24,44 +24,6 @@ enum Stem: Int, CaseIterable {
     }
 }
 
-/// What to do with the singer's formants when the key moves.
-///
-/// Shifting a voice down carries its whole spectral envelope down with it,
-/// which is why a pitched-down singer sounds like a larger one. Rubber Band
-/// can estimate that envelope and hold it in place — and, past that, lift it
-/// further, which is worth a try because the estimate comes from the whole
-/// mix rather than the voice alone and tends to under-correct.
-enum FormantMode: String, CaseIterable {
-    case off, natural, split
-
-    var title: String {
-        switch self {
-        case .off: return "Off"
-        case .natural: return "Natural"
-        case .split: return "Split"
-        }
-    }
-
-    var summary: String {
-        switch self {
-        case .off: return "Let the voice move with the key. Lower sounds larger."
-        case .natural: return "Hold the singer's tone, judged from the whole mix."
-        case .split: return "Separate the voice out and hold its tone on its own. "
-                + "Needs the model, and runs it even for a full mix."
-        }
-    }
-
-    /// nil lets the formants move with the pitch.
-    var over: Double? {
-        switch self {
-        case .off: return nil
-        case .natural, .split: return 1.0
-        }
-    }
-
-    var isSplit: Bool { self == .split }
-}
-
 /// Named stem sets. These are *shortcuts*, not a separate mode: the truth is
 /// always the stem mask, and a preset is simply the name of a common one. Any
 /// other mask is unnamed, which is why `preset` is optional rather than having
@@ -100,9 +62,9 @@ final class AudioController {
     private(set) var semitones = 0
     private(set) var rememberThisSong = true
 
-    /// How much of the singer's tone to hold on to when the key moves.
-    /// Persisted; see `PitchEngine.formantOver` for what each one does.
-    private(set) var formantMode: FormantMode
+    /// Keep the singer sounding like themselves when the key moves. Persisted;
+    /// see `PitchEngine.preserveFormants` for what it does.
+    private(set) var preserveFormants: Bool
     private(set) var engaged = false
 
     /// Global on/off. When off, the pipeline never engages and Spotify plays
@@ -170,7 +132,7 @@ final class AudioController {
     private static let reductionKey = "vocalReduction"        // legacy string
     private static let isolateKey = "isolateTrack"       // legacy, read once
     private static let advancedKey = "advancedStems"     // legacy Bool, unused
-    private static let formantKey = "formantMode"
+    private static let formantKey = "preserveFormants"
     private static let stemMaskKey = "stemMask"
     private static let stemMaskCountKey = "stemMaskCount"
 
@@ -179,10 +141,9 @@ final class AudioController {
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
-        formantMode = ProcessInfo.processInfo.environment["TRANSPOSIFY_FORMANT"]
-            .flatMap(FormantMode.init(rawValue:))
-            ?? defaults.string(forKey: Self.formantKey)
-                .flatMap(FormantMode.init(rawValue:)) ?? .natural
+        preserveFormants = defaults.object(forKey: Self.formantKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.formantKey)
         knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
         let available = (1 << knownStemCount) - 1
         // The mask is the whole of the saved state. `isolateTrack` is the older
@@ -254,7 +215,7 @@ final class AudioController {
     /// True while the model is still loading and "Best" is selected — the UI
     /// shows this rather than looking broken during a cold load.
     /// The model is only needed when some stem is actually being dropped.
-    var needsModel: Bool { !currentSelection.isPassthrough || formantMode.isSplit }
+    var needsModel: Bool { !currentSelection.isPassthrough }
 
     var preparingModel: Bool { needsModel && modelLoader.isLoading }
     var modelReadyForSimulation: Bool { modelLoader.model != nil }
@@ -502,16 +463,9 @@ final class AudioController {
     func setSemitones(_ value: Int) {
         let clamped = max(-12, min(12, value))
         guard clamped != semitones else { return }
-        let wasSplit = splitActive
         pendingSemitones = nil          // the user is taking over: apply now
         semitones = clamped
         engine?.semitones = clamped
-        // Split only exists while the key is actually moving, so crossing zero
-        // adds or removes the vocal path, which is built at engage.
-        if splitActive != wasSplit {
-            applySelection()
-            if engaged { reconfigure() }
-        }
         persistIfRemembering()
         updateEngagement()
         onChange?()
@@ -558,26 +512,17 @@ final class AudioController {
         defaults.set(stemCount, forKey: Self.stemMaskCountKey)
     }
 
-    /// True when the vocal is pitched on its own path. It needs the model and
-    /// a key change to be worth anything, and falls back quietly without them.
-    var splitActive: Bool {
-        formantMode.isSplit && SeparationModel.isInstalled && semitones != 0
-    }
-
     /// What the worker should emit.
     private var currentSelection: StemSelection {
         let available = (1 << stemCount) - 1
         let mask = stemMask & available
         // Everything selected is the untouched mix, which passthrough gives
-        // bit-exact and without running the model at all — unless the vocal
-        // has to come out separately, which takes a prediction.
-        if mask == available { return splitActive ? .stems(mask: mask) : .passthrough }
-        return .stems(mask: mask)
+        // bit-exact and without running the model at all.
+        return mask == available ? .passthrough : .stems(mask: mask)
     }
 
     private func applySelection() {
         separation?.setSelection(currentSelection)
-        separation?.setSplitVocal(splitActive)
         recorder?.selection(stemMask: stemMask, passthrough: currentSelection.isPassthrough)
     }
 
@@ -619,21 +564,12 @@ final class AudioController {
         onChange?()
     }
 
-    func setFormantMode(_ mode: FormantMode) {
-        guard mode != formantMode else { return }
-        let wasSplit = splitActive
-        formantMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: Self.formantKey)
-        log.notice("formant mode \(mode.rawValue, privacy: .public)")
-        if splitActive != wasSplit {
-            // The vocal path is built at engage, so turning it on or off
-            // rebuilds the pipeline. Everything else applies in place.
-            if needsModel { modelLoader.prepare() }
-            applySelection()
-            if engaged { reconfigure() } else { updateEngagement() }
-        } else {
-            engine?.formantOver = mode.over
-        }
+    func setPreserveFormants(_ on: Bool) {
+        guard on != preserveFormants else { return }
+        preserveFormants = on
+        UserDefaults.standard.set(on, forKey: Self.formantKey)
+        engine?.preserveFormants = on
+        log.notice("formants \(on ? "preserved" : "shifted", privacy: .public)")
         onChange?()
     }
 
@@ -893,7 +829,6 @@ final class AudioController {
                 (inference \(String(format: "%.0f", (SeparationModelLoader.measuredInference ?? 0) * 1000), privacy: .public) ms)
                 """)
             separation.setSelection(currentSelection)
-            separation.setSplitVocal(splitActive)
             separation.start()
             self.separation = separation
             let sourceRing = separation.outputRing
@@ -915,10 +850,9 @@ final class AudioController {
 
             let engine = PitchEngine(sampleRate: capture.sampleRate,
                                      channels: capture.channelCount, ring: sourceRing,
-                                     vocalRing: splitActive ? separation.vocalRing : nil,
                                      recorder: recorder, manualRendering: simulationMode)
             engine.semitones = semitones
-            engine.formantOver = formantMode.over
+            engine.preserveFormants = preserveFormants
             engine.onConfigurationChange = { [weak self] in self?.reconfigure() }
             // Hold output until a cushion of audio exists. Releasing as soon as
             // the ring is merely non-empty leaves no floor, so every hiccup —
