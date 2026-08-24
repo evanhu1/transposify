@@ -204,12 +204,28 @@ final class PopoverViewController: NSViewController {
         powerButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         powerButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
 
-        let nowSpacer = NSView()
-        nowSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let nowHeader = NSStackView(views: [artworkTile, nowRow, nowSpacer, powerButton])
-        nowHeader.orientation = .horizontal
-        nowHeader.alignment = .centerY
-        nowHeader.spacing = 8
+        // Laid out by hand rather than by a stack view. A stack negotiates
+        // widths from its arranged views' priorities, and that negotiation is
+        // what let a long title claim the power button's space and draw over
+        // it. Here the artwork is pinned left, the button right, and the text
+        // gets whatever is between them and not one point more.
+        let nowHeader = NSView()
+        for v in [artworkTile, nowRow, powerButton] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            nowHeader.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            artworkTile.leadingAnchor.constraint(equalTo: nowHeader.leadingAnchor),
+            artworkTile.centerYAnchor.constraint(equalTo: nowHeader.centerYAnchor),
+            powerButton.trailingAnchor.constraint(equalTo: nowHeader.trailingAnchor),
+            powerButton.centerYAnchor.constraint(equalTo: nowHeader.centerYAnchor),
+            nowRow.leadingAnchor.constraint(equalTo: artworkTile.trailingAnchor, constant: 8),
+            nowRow.centerYAnchor.constraint(equalTo: nowHeader.centerYAnchor),
+            nowRow.trailingAnchor.constraint(lessThanOrEqualTo: powerButton.leadingAnchor,
+                                             constant: -10),
+            nowHeader.heightAnchor.constraint(greaterThanOrEqualTo: artworkTile.heightAnchor),
+            nowHeader.heightAnchor.constraint(greaterThanOrEqualTo: nowRow.heightAnchor),
+        ])
 
         // Transpose --------------------------------------------------------
         let transposeTitle = NSTextField(labelWithString: "Transpose")
@@ -417,17 +433,8 @@ final class PopoverViewController: NSViewController {
             v.setContentHuggingPriority(.defaultLow, for: .horizontal)
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
-        nowRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titleRow.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
         artistLabel.widthAnchor.constraint(equalTo: nowRow.widthAnchor).isActive = true
-        // The labels are exactly as wide as the row above, so the row's width
-        // is what decides where they truncate — and that width is the stack
-        // view's arithmetic, not a promise. Bound it against the power button
-        // directly. The labels resist compression weakly, so the only way to
-        // satisfy this is to truncate; without it a long title drew over the
-        // button and off the popover's edge.
-        nowRow.trailingAnchor.constraint(lessThanOrEqualTo: powerButton.leadingAnchor,
-                                         constant: -8).isActive = true
         artwork.onChange = { [weak self] in self?.refresh() }
         inactiveWhenOff = [header, sliderRow, karaokeRow, rememberRow]
         view = container
@@ -479,6 +486,10 @@ final class PopoverViewController: NSViewController {
         }
 
         updateArtwork()
+        if Self.headerDebug {
+            view.layoutSubtreeIfNeeded()
+            reportHeaderFrames()
+        }
 
         let s = controller.semitones
         valueLabel.stringValue = s == 0 ? "0" : (s > 0 ? "+\(s)" : "\u{2212}\(abs(s))")
@@ -602,6 +613,11 @@ final class PopoverViewController: NSViewController {
     /// Only the height is taken. The width is a design constant, and a long
     /// track title reports a `fittingSize` a few points wider than it, which
     /// would nudge the popover sideways as songs change.
+    /// TRANSPOSIFY_HEADER_DEBUG=1 prints the header's widths on every refresh,
+    /// so a real session can be measured instead of guessed at.
+    private static let headerDebug =
+        ProcessInfo.processInfo.environment["TRANSPOSIFY_HEADER_DEBUG"] == "1"
+
     /// What width the header's parts ended up with, for `popoverSnapshot`.
     func reportHeaderFrames() {
         func f(_ name: String, _ v: NSView?) {
