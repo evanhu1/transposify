@@ -137,7 +137,13 @@ final class AudioController {
         enabled = defaults.object(forKey: Self.enabledKey) == nil
             ? true
             : defaults.bool(forKey: Self.enabledKey)
-        knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int ?? 4
+        // Six, matching the model the app downloads. Only a fresh install
+        // uses this: from then on it is whatever the loaded model reported.
+        // It was 4 while the shipped model had four stems, which left a new
+        // user looking at four tiles until they picked a mix that needed the
+        // model — and with All selected, that could be never.
+        knownStemCount = defaults.object(forKey: Self.stemMaskCountKey) as? Int
+            ?? Stem.allCases.count
         let available = (1 << knownStemCount) - 1
         // The mask is the whole of the saved state. `isolateTrack` is the older
         // named-mode setting, read once for anyone upgrading and never written.
