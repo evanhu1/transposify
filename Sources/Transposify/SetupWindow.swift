@@ -87,8 +87,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
             symbol: "waveform",
             title: "Hear Spotify",
             detail: "Reads the audio Spotify is playing so it can be shifted. "
-                + "macOS asks twice, as System Audio Recording and as Microphone. "
-                + "Your microphone is never opened; that second name is macOS's.",
+                + "macOS calls this System Audio Recording.",
             action: #selector(allowAudio),
             target: self)
 
@@ -146,6 +145,10 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
             ? "Transposify is ready"
             : "Grant Transposify permissions"
         primaryButton.title = ready ? "Done" : "Continue"
+        // Nothing to continue to until the app can hear Spotify.
+        primaryButton.isEnabled = ready
+        primaryButton.setAccessibilityHelp(ready
+            ? nil : "Available once audio access is granted.")
     }
 
     @objc private func allowAudio() {

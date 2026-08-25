@@ -61,10 +61,16 @@ final class AudioCapture {
     /// download, on top of the popover, which closed it. A global tap that
     /// is created and destroyed at once triggers the same prompt at launch,
     /// where a dialog is expected. Blocks until the user answers.
-    /// Whether a tap can be created right now, without asking. Only
-    /// meaningful once the question has been put — before that, creating a
-    /// tap is what puts it.
+    /// Try to create a tap and throw it away, reporting whether it worked.
+    ///
+    /// This is both the question and the answer: the first call is what makes
+    /// macOS ask for System Audio Recording, and every call after reports
+    /// whether the grant is in place. There is no API that reads it.
+    @discardableResult
     static func canTap() -> Bool {
+        // A global tap does not trip the check; a tap on a process does. Tap
+        // Spotify if it is running, otherwise this process. Unmuted, so
+        // nothing goes silent while it exists.
         let pid = NSWorkspace.shared.runningApplications
             .first(where: { $0.bundleIdentifier == "com.spotify.client" })?
             .processIdentifier ?? ProcessInfo.processInfo.processIdentifier
@@ -77,28 +83,6 @@ final class AudioCapture {
         guard AudioHardwareCreateProcessTap(desc, &tap) == noErr else { return false }
         AudioHardwareDestroyProcessTap(tap)
         return true
-    }
-
-    static func requestAuthorization() {
-        // A global tap does not trip the check; a tap on a process does. Tap
-        // Spotify if it is running, otherwise this process — either one asks
-        // the same question. Unmuted, so nothing goes silent while it exists.
-        let pid = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == "com.spotify.client" })?
-            .processIdentifier ?? ProcessInfo.processInfo.processIdentifier
-        guard let object = try? processObject(forPID: pid) else { return }
-        let desc = CATapDescription(stereoMixdownOfProcesses: [object])
-        desc.name = "Transposify Authorization"
-        desc.isPrivate = true
-        desc.muteBehavior = .unmuted
-        var tap = AudioObjectID(kAudioObjectUnknown)
-        let status = AudioHardwareCreateProcessTap(desc, &tap)
-        if status == noErr {
-            AudioHardwareDestroyProcessTap(tap)
-            log.notice("audio-capture authorization probed via pid \(pid, privacy: .public)")
-        } else {
-            log.notice("audio-capture authorization tap failed: \(status, privacy: .public)")
-        }
     }
 
     func start() throws {
