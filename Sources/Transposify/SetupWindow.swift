@@ -4,15 +4,14 @@ import AppKit
 /// asks in its own.
 ///
 /// The system's permission dialogs cannot be restyled and give almost no
-/// context — "Transposify would like to access the microphone" is alarming for
-/// an app that never opens a microphone. So this window says what is about to
-/// be asked and why, in plain words, and only then puts the question. Nothing
-/// is asked until a button here is pressed.
+/// context. "Transposify would like to access the microphone" is alarming for
+/// an app that never opens a microphone, so this window says what is about to
+/// be asked and why before putting the question. Nothing is asked until a
+/// button here is pressed.
 ///
 /// Two rows, not three: System Audio Recording and Microphone are two grants
 /// behind one capability, and splitting them would make the app look three
-/// times as hungry as it is. The second row is marked optional because it
-/// genuinely is.
+/// times as hungry as it is.
 final class SetupWindowController: NSWindowController, NSWindowDelegate {
     private let spotify: SpotifyState
     private let onFinish: () -> Void
@@ -21,7 +20,6 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
     private var spotifyRow: PermissionRow!
     private let titleLabel = NSTextField(labelWithString: "")
     private let primaryButton = NSButton()
-    private let laterButton = NSButton()
     private var poll: Timer?
 
     private static let completedKey = "setupCompleted"
@@ -81,9 +79,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         title.setAccessibilityRole(.staticText)
 
         let blurb = NSTextField(wrappingLabelWithString:
-            "It changes the key of whatever Spotify is playing, and can take the "
-            + "vocals out. macOS will ask you to confirm each one — nothing is "
-            + "requested until you press a button here.")
+            "This app requires a few permissions to work correctly.")
         blurb.font = .systemFont(ofSize: 13)
         blurb.textColor = .secondaryLabelColor
 
@@ -91,20 +87,16 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
             symbol: "waveform",
             title: "Hear Spotify",
             detail: "Reads the audio Spotify is playing so it can be shifted. "
-                + "macOS asks about this twice, as System Audio Recording and as "
-                + "Microphone. Your microphone is never opened — that second name "
-                + "is macOS's, not a second request.",
-            requirement: "Required",
+                + "macOS asks twice, as System Audio Recording and as Microphone. "
+                + "Your microphone is never opened; that second name is macOS's.",
             action: #selector(allowAudio),
             target: self)
 
         spotifyRow = PermissionRow(
             symbol: "music.note.list",
             title: "Read what's playing",
-            detail: "Shows the song title and artwork, and pauses Spotify for a "
-                + "few seconds while the separation model loads. Skip it and "
-                + "everything else still works.",
-            requirement: "Optional",
+            detail: "Shows the song title and artwork, and pauses Spotify "
+                + "while the separation model loads.",
             action: #selector(allowSpotify),
             target: self)
 
@@ -114,14 +106,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         primaryButton.target = self
         primaryButton.action = #selector(finish)
 
-        laterButton.title = "Do this later"
-        laterButton.bezelStyle = .push
-        laterButton.target = self
-        laterButton.action = #selector(finish)
-        laterButton.setAccessibilityHelp(
-            "Close setup. You can reopen it from the Transposify menu.")
-
-        let buttons = NSStackView(views: [NSView(), laterButton, primaryButton])
+        let buttons = NSStackView(views: [NSView(), primaryButton])
         buttons.orientation = .horizontal
         buttons.spacing = 10
 
@@ -159,9 +144,8 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         let ready = Permission.audio.isAllowed
         titleLabel.stringValue = ready
             ? "Transposify is ready"
-            : "Transposify needs two things"
+            : "Grant Transposify permissions"
         primaryButton.title = ready ? "Done" : "Continue"
-        laterButton.isHidden = ready
     }
 
     @objc private func allowAudio() {
@@ -222,7 +206,7 @@ private final class PermissionRow: NSView {
     private var settings: Permission.Pane = .microphone
     private var state: Permission.State = .notAsked
 
-    init(symbol: String, title: String, detail: String, requirement: String,
+    init(symbol: String, title: String, detail: String,
          action: Selector, target: AnyObject) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -239,12 +223,7 @@ private final class PermissionRow: NSView {
         let name = NSTextField(labelWithString: title)
         name.font = .systemFont(ofSize: 14, weight: .semibold)
 
-        let tag = NSTextField(labelWithString: requirement)
-        tag.font = .systemFont(ofSize: 11, weight: .medium)
-        tag.textColor = .secondaryLabelColor
-        tag.setAccessibilityLabel("\(requirement) permission")
-
-        let heading = NSStackView(views: [icon, name, tag, NSView()])
+        let heading = NSStackView(views: [icon, name, NSView()])
         heading.orientation = .horizontal
         heading.alignment = .firstBaseline
         heading.spacing = 8
@@ -288,7 +267,7 @@ private final class PermissionRow: NSView {
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("\(title), \(requirement)")
+        setAccessibilityLabel(title)
         updateBorder()
     }
 
@@ -322,12 +301,9 @@ private final class PermissionRow: NSView {
             statusLabel.stringValue = "Allowed"
             statusLabel.textColor = .secondaryLabelColor
             button.isHidden = true
-        case .notAsked:
-            statusIcon.image = NSImage(systemSymbolName: "circle.dashed",
-                                       accessibilityDescription: nil)
-            statusIcon.contentTintColor = .secondaryLabelColor
-            statusLabel.stringValue = "Not asked yet"
-            statusLabel.textColor = .secondaryLabelColor
+        case .notAsked, .unavailable:
+            statusIcon.image = nil
+            statusLabel.stringValue = ""
             button.isHidden = false
             button.title = "Allow…"
             button.keyEquivalent = ""
@@ -339,15 +315,9 @@ private final class PermissionRow: NSView {
             statusLabel.textColor = .labelColor
             button.isHidden = false
             button.title = "Open Settings"
-        case .unavailable(let why):
-            statusIcon.image = NSImage(systemSymbolName: "info.circle",
-                                       accessibilityDescription: nil)
-            statusIcon.contentTintColor = .secondaryLabelColor
-            statusLabel.stringValue = why
-            statusLabel.textColor = .secondaryLabelColor
-            button.isHidden = true
         }
-        setAccessibilityValue(statusLabel.stringValue)
+        setAccessibilityValue(statusLabel.stringValue.isEmpty
+            ? "Not granted" : statusLabel.stringValue)
         button.setAccessibilityLabel("\(button.title) for \(accessibilityLabel() ?? "")")
     }
 
