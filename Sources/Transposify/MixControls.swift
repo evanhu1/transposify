@@ -109,7 +109,6 @@ final class StemTile: MixToggle {
     init(stem: Stem, target: AnyObject?, action: Selector?) {
         self.stem = stem
         super.init(label: stem.title, target: target, action: action)
-        toolTip = "Play the \(stem.title.lowercased()) part."
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }

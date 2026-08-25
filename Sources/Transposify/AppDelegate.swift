@@ -103,9 +103,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controller.onChange = { [weak self] in
             DispatchQueue.main.async { self?.refreshUI() }
         }
-        spotify.onChange = { [weak self] in
-            DispatchQueue.main.async { self?.syncSpotifyToController() }
-        }
         controller.setSpotifyPlaying = { [weak self] playing in
             self?.spotify.setPlaying(playing) ?? false
         }
@@ -118,8 +115,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controller.shutdown()
     }
 
-    /// Process taps are gated on Microphone (kTCCServiceMicrophone) access.
-    /// Begin monitoring Spotify once we know the permission outcome.
     private var setupWindow: SetupWindowController?
 
     /// Nothing is asked of macOS until the setup window asks it. The raw
@@ -127,8 +122,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// appeared later when Spotify was first queried — three system dialogs,
     /// one of them naming the microphone, for an app that never opens one.
     private func requestMicrophoneThenStart() {
+        // Watching Spotify sends it nothing, and setup needs to know whether
+        // it is playing before any question is put.
+        spotify.startObserving()
+
         let begin: () -> Void = { [weak self] in
-            self?.spotify.start()
+            // Wired here, not at launch: it fetches artwork, which is an Apple
+            // Event, and during setup that would put the Automation question
+            // the moment a song started playing.
+            self?.spotify.onChange = { [weak self] in
+                DispatchQueue.main.async { self?.syncSpotifyToController() }
+            }
+            // Sending Spotify an Apple Event is what makes macOS ask about
+            // Automation, so it is only done on behalf of someone who has
+            // already said yes. Anyone else is watched over playback
+            // notifications, which need no permission, until they open the
+            // popover and ask for themselves.
+            if SetupWindowController.hasRunSetup {
+                self?.spotify.start()
+            } else {
+                self?.spotify.startObserving()
+            }
             self?.syncSpotifyToController()
             self?.applyDebugHooks()
             log.notice("""
@@ -136,28 +150,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 playing \(self?.spotify.isPlaying == true, privacy: .public)
                 """)
         }
+        // Setup is for people who have not done it, and for a grant that has
+        // since been taken away. Anything else — Spotify closed, Spotify
+        // paused — leaves the probe unable to tell, and a window that opens
+        // every time the Mac starts before Spotify does is worse than no
+        // window at all.
+        guard Permission.audioAsked else {
+            presentSetup(then: begin)
+            return
+        }
         // Settle the audio answer before deciding, but only where doing so
         // cannot put a question: probing is a real capture, and for a user
         // who has never been asked that would be a dialog out of nowhere.
-        let decide: (Bool) -> Void = { allowed in
+        Permission.checkAudio { [weak self] state in
             DispatchQueue.main.async {
-                if allowed {
+                guard let self else { return }
+                if state.isAllowed {
                     // Nothing to explain, including for anyone upgrading from
                     // a version that asked at launch.
                     SetupWindowController.hasRunSetup = true
                     begin()
-                } else {
-                    // Always, now that nothing else reopens it: without audio
-                    // the app cannot do anything, and a silent broken menu bar
-                    // item is worse than a window explaining why.
+                } else if state == .denied || !SetupWindowController.hasRunSetup {
                     self.presentSetup(then: begin)
+                } else {
+                    begin()
                 }
             }
-        }
-        if Permission.audioAsked {
-            Permission.checkAudio { decide($0.isAllowed) }
-        } else {
-            decide(false)
         }
     }
 

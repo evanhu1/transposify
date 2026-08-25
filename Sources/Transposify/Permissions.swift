@@ -59,13 +59,31 @@ enum Permission {
     /// demand rather than every time something wants to know.
     private static var probed: State?
 
+    /// What a probe means. Running Spotify is the whole precondition:
+    /// measured, a tap on a paused Spotify still delivers buffers, so silence
+    /// from a Spotify that is up is a refusal rather than a quiet moment. A
+    /// Spotify that is not up tells us nothing either way.
+    private static func read(_ probe: AudioCapture.Probe) -> State {
+        switch probe {
+        case .captured:
+            return .allowed
+        case .failed(let error):
+            if case AudioCaptureError.spotifyNotFound = error {
+                return .unavailable("Open Spotify first.")
+            }
+            return .denied
+        case .silent:
+            return .denied
+        }
+    }
+
     /// Run the probe and remember the answer. Before the question has ever
     /// been put this *is* the question, so callers must only run it when the
     /// user has asked for it — otherwise a dialog appears unbidden, which is
     /// the whole thing this flow exists to avoid.
     static func checkAudio(_ completion: ((State) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let state: State = AudioCapture.canCapture() ? .allowed : .denied
+            let state = read(AudioCapture.probe())
             DispatchQueue.main.async {
                 probed = state
                 completion?(state)
@@ -73,15 +91,19 @@ enum Permission {
         }
     }
 
-    /// Refresh the answer only when doing so cannot prompt.
-    static func refreshAudioIfSettled() {
-        guard audioAsked, probed == nil else { return }
-        checkAudio()
-    }
-
     static var systemAudio: State {
         if let probed { return probed }
-        return audioAsked ? .denied : .notAsked
+        // No probe, no answer. Reporting a refusal here would put "Not
+        // allowed" on a grant that may well be in place.
+        return .notAsked
+    }
+
+    /// Re-read the answer when doing so cannot put a question: only after the
+    /// user has been asked once, and only with Spotify running, or the probe
+    /// learns nothing.
+    static func recheckIfAsked(running: Bool) {
+        guard audioAsked, running, probed?.isAllowed != true else { return }
+        checkAudio()
     }
 
     /// Whether the app can hear Spotify, which is the only thing a person
@@ -93,27 +115,28 @@ enum Permission {
     ///
     /// The tap prompt blocks the thread it is put on, so this must not run on
     /// the main thread; the answer comes back on the main queue.
+    ///
+    /// Only call this with Spotify running. With Spotify closed the probe
+    /// cannot put the question at all, and the fallback below then asks for
+    /// the microphone for no reason — which is the bug this flow exists to
+    /// prevent.
     static func requestAudio(_ completion: @escaping (State) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             audioAsked = true
-            if AudioCapture.canCapture() {
-                DispatchQueue.main.async {
-                    probed = .allowed
-                    completion(.allowed)
-                }
-                return
-            }
-            // Older systems gate the tap on Microphone as well. Nothing else
-            // explains a refusal we did not get a dialog for, so ask, and try
-            // once more.
-            guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
-                DispatchQueue.main.async { probed = .denied; completion(.denied) }
+            let state = read(AudioCapture.probe())
+            // Older systems gate the tap on Microphone as well. Only a real
+            // refusal justifies asking: an unavailable answer means the probe
+            // never got to put the question.
+            guard state == .denied,
+                  AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+            else {
+                DispatchQueue.main.async { probed = state; completion(state) }
                 return
             }
             log.notice("tap refused; falling back to asking for microphone access")
             AVCaptureDevice.requestAccess(for: .audio) { _ in
-                let state: State = AudioCapture.canCapture() ? .allowed : .denied
-                DispatchQueue.main.async { probed = state; completion(state) }
+                let retry = read(AudioCapture.probe())
+                DispatchQueue.main.async { probed = retry; completion(retry) }
             }
         }
     }

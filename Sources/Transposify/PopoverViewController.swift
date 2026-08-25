@@ -304,7 +304,6 @@ final class PopoverViewController: NSViewController {
         for preset in MixPreset.allCases {
             let chip = MixChip(title: preset.title, target: self,
                                action: #selector(presetTapped(_:)))
-            chip.toolTip = preset.summary
             presetChips[preset] = chip
             chips.append(chip)
         }
@@ -329,8 +328,6 @@ final class PopoverViewController: NSViewController {
         downloadButton.alignment = .center
         downloadButton.target = self
         downloadButton.action = #selector(modelButtonTapped)
-        downloadButton.toolTip = "A \(SeparationModel.downloadSizeDescription) download, once. "
-            + "Separation then runs on your Mac; the file is verified against a checksum."
 
         // The chips and tiles sit in a host view so the download button can
         // float over their centre: the greyed-out controls are the question
@@ -517,9 +514,6 @@ final class PopoverViewController: NSViewController {
 
         let on = controller.enabled
         powerButton.contentTintColor = on ? transposeAccent : .tertiaryLabelColor
-        powerButton.toolTip = on
-            ? "Transposing is on \u{2014} click to just listen"
-            : "Transposing is off \u{2014} click to enable"
         // Catching up dims the same rows as Off, for the same reason: the
         // controls are showing a mix the audio is not playing yet. The dim
         // says "not in effect", so it belongs to both.

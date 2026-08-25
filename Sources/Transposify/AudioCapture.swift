@@ -59,14 +59,15 @@ final class AudioCapture {
         interleaveScratch.deallocate()
     }
 
-    /// Ask for System Audio Recording permission now, not at the first engage.
-    ///
-    /// The tap needs `kTCCServiceAudioCapture`, which is not the Microphone
-    /// permission the launch sequence already requests, so without this the
-    /// consent dialog appeared at the first engage — right after the model
-    /// download, on top of the popover, which closed it. A global tap that
-    /// is created and destroyed at once triggers the same prompt at launch,
-    /// where a dialog is expected. Blocks until the user answers.
+    /// What a probe capture saw. The three answers are not the same thing:
+    /// frames prove the grant, a failure to start is the grant being refused,
+    /// and silence proves nothing at all — Spotify may simply be paused.
+    enum Probe {
+        case captured
+        case silent
+        case failed(Error)
+    }
+
     /// Whether the app can actually capture Spotify, and the thing that makes
     /// macOS ask if it has not been asked.
     ///
@@ -76,20 +77,29 @@ final class AudioCapture {
     /// than during setup. So the probe does the whole thing: tap, aggregate
     /// device, IO proc, start, wait for frames, tear down. Unmuted, so Spotify
     /// keeps playing while it runs.
-    static func canCapture() -> Bool {
+    ///
+    /// The caller decides what silence means. Only it knows whether Spotify
+    /// was playing, and without that a paused Spotify reads as a refusal.
+    static func probe() -> Probe {
         let capture = AudioCapture(muted: false)
         do {
             try capture.start()
         } catch {
             log.notice("audio probe could not start: \(String(describing: error), privacy: .public)")
-            return false
+            return .failed(error)
         }
-        // Long enough for the device to deliver at least one buffer.
-        Thread.sleep(forTimeInterval: 0.4)
-        let frames = capture.ring.availableToRead
+        // Poll rather than sleep once: a device created for the first time on
+        // a machine takes longer to deliver than a warm one, and a fixed wait
+        // that is long enough for that is a wait everyone else pays.
+        var frames = 0
+        for _ in 0..<30 {
+            frames = capture.ring.availableToRead
+            if frames > 0 { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         capture.stop()
         log.notice("audio probe captured \(frames, privacy: .public) floats")
-        return frames > 0
+        return frames > 0 ? .captured : .silent
     }
 
     func start() throws {

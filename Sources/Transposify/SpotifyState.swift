@@ -23,7 +23,22 @@ final class SpotifyState {
     private let bundleID = "com.spotify.client"
     private let notifName = Notification.Name("com.spotify.client.PlaybackStateChanged")
 
-    func start() {
+    private var observing = false
+    /// Whether Apple Events may be sent without the user having just asked
+    /// for something. Setup watches Spotify long before the Automation
+    /// question has been put, and an event sent on its own initiative is what
+    /// makes macOS put it — so the answer stays no until the user presses the
+    /// button that means yes.
+    private var maySendEvents = false
+
+    /// Begin watching Spotify without sending it anything.
+    ///
+    /// Playback notifications need no permission, so setup can know what is
+    /// playing before the Automation question has been put. Safe to call more
+    /// than once.
+    func startObserving() {
+        guard !observing else { return }
+        observing = true
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(playbackChanged(_:)), name: notifName, object: nil)
         let workspace = NSWorkspace.shared.notificationCenter
@@ -32,6 +47,11 @@ final class SpotifyState {
         workspace.addObserver(self, selector: #selector(appsChanged),
                               name: NSWorkspace.didTerminateApplicationNotification, object: nil)
         refreshRunning()
+    }
+
+    func start() {
+        startObserving()
+        maySendEvents = true
         // Querying is also what triggers macOS's consent prompt.
         if isRunning { queryInitialState() }
     }
@@ -40,6 +60,24 @@ final class SpotifyState {
     /// before `start()` has run, and asking over Apple Events would put the
     /// Automation question before the user has pressed anything.
     func refreshRunningState() { refreshRunning() }
+
+    /// Whether Spotify is on this Mac at all. Everything setup asks for is
+    /// about Spotify, so there is nothing to ask when it is missing.
+    var isInstalled: Bool { appURL != nil }
+
+    private var appURL: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+    }
+
+    /// Open Spotify. Returns whether it could be started at all — a missing
+    /// app has to be said out loud rather than left as a spinner.
+    @discardableResult
+    func launch() -> Bool {
+        guard let appURL else { return false }
+        NSWorkspace.shared.openApplication(at: appURL,
+                                           configuration: NSWorkspace.OpenConfiguration())
+        return true
+    }
 
     private func refreshRunning() {
         isRunning = NSWorkspace.shared.runningApplications
@@ -50,7 +88,7 @@ final class SpotifyState {
     @objc private func appsChanged() {
         let wasRunning = isRunning
         refreshRunning()
-        if isRunning && !wasRunning {
+        if isRunning && !wasRunning, maySendEvents {
             // Spotify's scripting interface isn't ready the instant it launches.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.queryInitialState()
@@ -73,23 +111,28 @@ final class SpotifyState {
     }
 
     private func queryInitialState() {
-        guard isRunning else { return }
+        guard isRunning, maySendEvents else { return }
+        // Player state first, and on its own. It is the one thing Spotify can
+        // always answer: `current track` fails when nothing has been played
+        // yet, and folding the two together made a fresh Spotify look like a
+        // refused permission.
+        guard let state = runAppleScript(
+            "tell application \"Spotify\" to return (player state) as text") else { return }
+        isPlaying = state.caseInsensitiveCompare("playing") == .orderedSame
         // Variable names matter here: `st` is reserved and makes the whole
         // script fail to compile, which silently left the initial snapshot
         // empty until the next play/pause notification arrived.
         guard let out = runAppleScript("""
         tell application "Spotify"
-            set playerState to (player state) as text
             set trackID to (id of current track) as text
             set trackName to (name of current track) as text
             set trackArtist to (artist of current track) as text
-            return playerState & "\u{0001}" & trackID & "\u{0001}" & trackName & "\u{0001}" & trackArtist
+            return trackID & "\u{0001}" & trackName & "\u{0001}" & trackArtist
         end tell
-        """) else { return }
+        """) else { current = nil; return }
         let parts = out.components(separatedBy: "\u{0001}")
-        guard parts.count >= 4 else { return }
-        isPlaying = parts[0].caseInsensitiveCompare("playing") == .orderedSame
-        current = TrackInfo(id: parts[1], name: parts[2], artist: parts[3])
+        guard parts.count >= 3 else { return }
+        current = TrackInfo(id: parts[0], name: parts[1], artist: parts[2])
     }
 
     /// Re-read now-playing over AppleScript. Called when the popover opens: a
@@ -98,6 +141,8 @@ final class SpotifyState {
     /// in System Settings after the fact.
     func refreshNowPlaying() {
         guard isRunning else { return }
+        // Asked for by hand, so this is the yes that unblocks the rest.
+        maySendEvents = true
         queryInitialState()
         onChange?()
     }
