@@ -36,6 +36,11 @@ final class SpotifyState {
         if isRunning { queryInitialState() }
     }
 
+    /// Whether Spotify is up, without sending it anything. Setup needs this
+    /// before `start()` has run, and asking over Apple Events would put the
+    /// Automation question before the user has pressed anything.
+    func refreshRunningState() { refreshRunning() }
+
     private func refreshRunning() {
         isRunning = NSWorkspace.shared.runningApplications
             .contains { $0.bundleIdentifier == bundleID }

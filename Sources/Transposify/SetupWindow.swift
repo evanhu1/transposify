@@ -136,6 +136,8 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - State
 
     private func refresh() {
+        // Nothing has started Spotify monitoring yet at this point in launch.
+        spotify.refreshRunningState()
         audioRow.apply(Permission.audio, settings: Permission.audioPane)
         spotifyRow.apply(Permission.spotifyControl(spotify), settings: .automation)
         // "Continue" once the required grant is in; until then the honest word
@@ -199,6 +201,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
+            self.spotify.refreshRunningState()
             if self.spotify.isRunning, attempt > 2 {
                 self.spotifyRow.setBusy(false)
                 self.spotify.refreshNowPlaying()
