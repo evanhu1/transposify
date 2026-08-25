@@ -22,8 +22,14 @@ enum Permission {
 
     // MARK: - Hearing Spotify
 
-    /// macOS 14.4+ gates the process tap on System Audio Recording, and some
-    /// releases gate it on Microphone as well, so both are asked for.
+    /// The tap needs System Audio Recording. It does not need Microphone —
+    /// measured, with the Microphone grant reset the tap still creates and
+    /// captures. The app never opens an input device.
+    ///
+    /// Microphone is asked for only if a tap cannot be made without it, which
+    /// is how the earliest macOS 14.4 releases behaved and is where the
+    /// original request came from. On anything that does not need it the word
+    /// "microphone" never reaches the user.
     ///
     /// There is no API that reports System Audio Recording without asking, so
     /// whether the question has been put is remembered here and the answer is
@@ -56,29 +62,33 @@ enum Permission {
         return AudioCapture.canTap() ? .allowed : .denied
     }
 
-    /// The two audio grants as one answer, since one missing grant means no
-    /// audio either way.
-    static var audio: State {
-        let parts = [systemAudio, microphone]
-        if parts.contains(.denied) { return .denied }
-        if parts.contains(.notAsked) { return .notAsked }
-        return .allowed
-    }
+    /// Whether the app can hear Spotify, which is the only thing a person
+    /// cares about. A tap that can be made is the whole answer; how many
+    /// grants sit behind it is macOS's business.
+    static var audio: State { systemAudio }
 
-    /// Put both audio questions, in order, then report. The System Audio
-    /// Recording prompt blocks the thread it is asked on, so this must not run
-    /// on the main thread; the answer comes back on the main queue.
+    /// Ask, and only escalate if asking was not enough.
+    ///
+    /// The tap prompt blocks the thread it is put on, so this must not run on
+    /// the main thread; the answer comes back on the main queue.
     static func requestAudio(_ completion: @escaping (State) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            AudioCapture.requestAuthorization()
             audioAsked = true
-            let afterMic: () -> Void = {
-                DispatchQueue.main.async { completion(audio) }
+            if AudioCapture.canTap() {
+                DispatchQueue.main.async { completion(.allowed) }
+                return
             }
-            if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-                AVCaptureDevice.requestAccess(for: .audio) { _ in afterMic() }
-            } else {
-                afterMic()
+            // Older systems gate the tap on Microphone as well. Nothing else
+            // explains a refusal we did not get a dialog for, so ask, and try
+            // once more.
+            guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
+                DispatchQueue.main.async { completion(.denied) }
+                return
+            }
+            log.notice("tap refused; falling back to asking for microphone access")
+            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                let state: State = AudioCapture.canTap() ? .allowed : .denied
+                DispatchQueue.main.async { completion(state) }
             }
         }
     }
@@ -114,9 +124,10 @@ enum Permission {
         }
     }
 
-    /// The pane that matters for a refused audio grant: whichever was refused.
+    /// A refused tap is almost always System Audio Recording; Microphone only
+    /// matters where it was the fallback, and then only if it was refused.
     static var audioPane: Pane {
-        systemAudio == .denied ? .audioRecording : .microphone
+        microphone == .denied ? .microphone : .audioRecording
     }
 
     // MARK: - Settings panes
