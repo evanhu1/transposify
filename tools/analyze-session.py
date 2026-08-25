@@ -92,13 +92,27 @@ def onset_envelope(audio: np.ndarray, rate: int) -> tuple[np.ndarray, np.ndarray
     return times, flux
 
 
-def delay_curve(input_audio: np.ndarray, output_audio: np.ndarray, rate: int) -> dict:
+def delay_curve(input_audio: np.ndarray, output_audio: np.ndarray, rate: int,
+                prior_seconds: float | None = None) -> dict:
     input_times, input_onsets = onset_envelope(input_audio, rate)
     output_times, output_onsets = onset_envelope(output_audio, rate)
     hop_seconds = float(np.median(np.diff(input_times)))
     window_bins = max(8, round(4.0 / hop_seconds))
     stride_bins = max(1, round(1.0 / hop_seconds))
     max_lag_bins = round(3.0 / hop_seconds)
+    # Bar-periodic music offers the envelope correlator many equally-good
+    # wrong alignments; a 4 s window cannot tell a true 0.5 s delay from a
+    # bar-aligned 2.5 s one. The worker publishes its counter-based depth
+    # alongside the audio, so use it as a prior: the acoustic estimate then
+    # only has to find the fine structure (Rubber Band + IO buffers) on top,
+    # which is exactly what it is good at.
+    min_lag_bins, max_lag_bins_prior = 0, max_lag_bins
+    if prior_seconds is not None and np.isfinite(prior_seconds):
+        margin_s = 0.150
+        min_lag_bins = max(0, int((prior_seconds - margin_s) / hop_seconds))
+        max_lag_bins_prior = min(max_lag_bins, int((prior_seconds + margin_s) / hop_seconds))
+        if max_lag_bins_prior <= min_lag_bins:
+            max_lag_bins_prior = min_lag_bins + 1
     limit = min(len(input_onsets), len(output_onsets))
     points = []
 
@@ -110,7 +124,7 @@ def delay_curve(input_audio: np.ndarray, output_audio: np.ndarray, rate: int) ->
             continue
         correlations = []
         lags = []
-        for lag in range(max_lag_bins + 1):
+        for lag in range(min_lag_bins, max_lag_bins_prior + 1):
             end = start + lag + window_bins
             if end > len(output_onsets):
                 break
@@ -183,8 +197,37 @@ def contiguous_runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
 
 
+def hold_windows(events: list[dict], session_seconds: float) -> list[tuple[float, float]]:
+    """Intervals where output was intentionally silent (hold/prime).
+
+    The app holds its render callback while paused and while priming; the
+    input keeps flowing in a recording, so those windows are silence by
+    design. Counting them as dropouts made every scripted pause look like
+    a pipeline failure. A `release` closes the window; an unclosed hold
+    runs to the end of the session.
+    """
+    windows: list[tuple[float, float]] = []
+    opened = 0.0
+    is_open = False
+    for event in events:
+        if event.get("ev") == "hold":
+            if not is_open:
+                opened = float(event.get("t", 0.0))
+                is_open = True
+        elif event.get("ev") == "release" and is_open:
+            windows.append((opened, float(event.get("t", opened))))
+            is_open = False
+    if is_open:
+        windows.append((opened, session_seconds))
+    return windows
+
+
+def in_hold(t: float, windows: list[tuple[float, float]], margin: float = 0.030) -> bool:
+    return any(start - margin <= t <= end + margin for start, end in windows)
+
+
 def dropout_analysis(input_audio: np.ndarray, output_audio: np.ndarray, rate: int,
-                     curve: dict, events: list[dict]) -> dict:
+                     curve: dict, events: list[dict], session_seconds: float) -> dict:
     output_times, output_rms = millisecond_rms(output_audio, rate)
     input_times, input_rms = millisecond_rms(input_audio, rate)
     delays = interpolated_delay(curve, output_times)
@@ -193,13 +236,19 @@ def dropout_analysis(input_audio: np.ndarray, output_audio: np.ndarray, rate: in
     aligned_non_silent = (aligned_times >= 0) & (input_rms[aligned_indices] >= SILENCE_RMS)
     candidates = (output_rms < SILENCE_RMS) & aligned_non_silent
     underruns = np.asarray([event["t"] for event in events if event.get("ev") == "underrun"])
+    holds = hold_windows(events, session_seconds)
     dropouts = []
+    held_out = 0
     for start, end in contiguous_runs(candidates):
         duration_ms = (end - start) * 1000 * (output_times[1] - output_times[0])
         if duration_ms < 2:
             continue
         began = max(0.0, output_times[start] - 0.0005)
         ended = began + duration_ms / 1000
+        if any(began < h_end + 0.030 and ended > h_start - 0.030
+               for h_start, h_end in holds):
+            held_out += 1          # intentional silence while held: not a failure
+            continue
         coincident = bool(np.any((underruns >= began - 0.030) & (underruns <= ended + 0.030)))
         dropouts.append({"t": began, "durationMs": duration_ms,
                          "coincidesWithUnderrun": coincident})
@@ -217,6 +266,8 @@ def dropout_analysis(input_audio: np.ndarray, output_audio: np.ndarray, rate: in
         "histogram": histogram,
         "coincidentWithUnderrun": explained,
         "unexplained": len(dropouts) - explained,
+        "heldOutCount": held_out,
+        "holdWindows": [list(w) for w in holds],
     }
 
 
@@ -239,6 +290,11 @@ def discontinuity_analysis(input_audio: np.ndarray, output_audio: np.ndarray, ra
     for dropout in dropouts["items"]:
         start = max(0, round(dropout["t"] * rate) - margin)
         end = min(len(exclusion), round((dropout["t"] + dropout["durationMs"] / 1000) * rate) + margin)
+        exclusion[start:end] = True
+    # Held windows are transitions by design; their edges are fades.
+    for h_start, h_end in dropouts["holdWindows"]:
+        start = max(0, round(h_start * rate) - round(rate * 0.030))
+        end = min(len(exclusion), round(h_end * rate) + round(rate * 0.030))
         exclusion[start:end] = True
     indices = np.flatnonzero(candidates & ~exclusion)
     if not len(indices):
@@ -272,10 +328,11 @@ def depth_comparison(curve: dict, events: list[dict]) -> dict:
     }
 
 
-def event_stats(events: list[dict], rate: int) -> dict:
+def event_stats(events: list[dict], rate: int, session_seconds: float) -> dict:
     steps = [event for event in events if event.get("ev") == "step"]
     depths = [event for event in events if event.get("ev") == "depth"]
     governors = [event for event in events if event.get("ev") == "governor"]
+    holds = hold_windows(events, session_seconds)
     engagements = 0
     previous = 1.0
     for event in governors:
@@ -283,9 +340,17 @@ def event_stats(events: list[dict], rate: int) -> dict:
         if ratio < 1 and previous >= 1:
             engagements += 1
         previous = ratio
-    ring_samples = [event.get(key, 0) for event in steps
+    # Ring depth during a hold is meaningless: nothing drains while held,
+    # and the pause itself drains it to zero by design. Same for the priming
+    # ramp before the first release. Steady-state minimum is the number that
+    # says whether mode switches have margin left.
+    first_release = next((float(e["t"]) for e in events if e.get("ev") == "release"), 0.0)
+    def steady(event: dict) -> bool:
+        t = float(event.get("t", -1.0))
+        return t >= first_release and not in_hold(t, holds, margin=0.0)
+    ring_samples = [event.get(key, 0) for event in steps if steady(event)
                     for key in ("ringBeforeFrames", "ringAfterFrames")]
-    ring_samples += [event.get("ringFrames", 0) for event in depths]
+    ring_samples += [event.get("ringFrames", 0) for event in depths if steady(event)]
     min_ring = min(ring_samples, default=0)
     return {
         "worstStepMs": max((event.get("durationMs", 0.0) for event in steps), default=0.0),
@@ -293,6 +358,7 @@ def event_stats(events: list[dict], rate: int) -> dict:
         "minRingMs": min_ring * 1000 / rate,
         "governorEngagements": engagements,
         "underrunEvents": sum(event.get("ev") == "underrun" for event in events),
+        "heldSeconds": sum(end - start for start, end in holds),
     }
 
 
@@ -393,6 +459,7 @@ def text_report(report: dict) -> str:
         f"Worst step:           {summary['worstStepMs']:.1f} ms",
         f"Minimum output ring:  {summary['minRingFrames']} frames ({summary['minRingMs']:.1f} ms)",
         f"Governor engagements: {summary['governorEngagements']}",
+        f"Held (intentional):   {summary.get('heldSeconds', 0):.2f} s excluded from stats",
         "",
         "Dropouts",
         "--------",
@@ -411,6 +478,8 @@ def text_report(report: dict) -> str:
         f"{finite(delay['medianSeconds'] * 1000)} / {finite(delay['maxSeconds'] * 1000)} ms",
         f"Trusted / weak windows: {delay['trustedWindows']} / {delay['weakWindows']}",
         f"Logged depth - acoustic delay median: {finite(depth['medianOffsetMs'])} ms",
+        f"Logged depth (counter truth):        "
+        f"{finite((report.get('loggedDepthPriorSeconds') or float('nan')) * 1000)} ms",
         "",
         "Discontinuities",
         "---------------",
@@ -442,12 +511,17 @@ def analyze(recording: Path, out: Path) -> dict:
     events = read_events(recording / "events.jsonl")
     out.mkdir(parents=True, exist_ok=True)
 
-    curve = delay_curve(input_audio, output_audio, input_rate)
-    dropouts = dropout_analysis(input_audio, output_audio, input_rate, curve, events)
-    stats = event_stats(events, input_rate)
+    session_seconds = len(output_audio) / input_rate
+    depths = [float(e["depthSeconds"]) for e in events if e.get("ev") == "depth"]
+    prior = float(np.median(depths)) if len(depths) >= 10 else None
+
+    curve = delay_curve(input_audio, output_audio, input_rate, prior_seconds=prior)
+    dropouts = dropout_analysis(input_audio, output_audio, input_rate, curve, events,
+                                session_seconds)
+    stats = event_stats(events, input_rate, session_seconds)
     report = {
         "summary": {
-            "sessionLengthSeconds": len(output_audio) / input_rate,
+            "sessionLengthSeconds": session_seconds,
             **stats,
         },
         "dropouts": dropouts,
@@ -455,6 +529,7 @@ def analyze(recording: Path, out: Path) -> dict:
             input_audio, output_audio, input_rate, curve, dropouts),
         "delay": curve,
         "depthComparison": depth_comparison(curve, events),
+        "loggedDepthPriorSeconds": prior,
     }
     (out / "report.json").write_text(
         json.dumps(json_safe(report), indent=2, sort_keys=True) + "\n", encoding="utf-8")

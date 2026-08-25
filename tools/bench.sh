@@ -25,7 +25,7 @@ fi
 STAMP=$(date +%Y%m%d-%H%M%S)
 OUTROOT="$ROOT/tools/bench-results/$STAMP"
 mkdir -p "$OUTROOT"
-SCRIPT="5:pause,7:play,12:vocals,20:all,25:backing,30:+3,40:track"
+SCRIPT="${BENCH_SCRIPT:-5:pause,7:play,12:vocals,20:all,25:backing,30:+3,40:track}"
 
 printf '%-20s %9s %12s %12s %12s %12s %12s\n' \
     config dropouts unexplained delay_ms drift_ms_min worst_ms min_ring
