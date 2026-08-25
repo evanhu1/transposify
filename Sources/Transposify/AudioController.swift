@@ -224,6 +224,12 @@ final class AudioController {
     /// This load has already had its one pause. Without it, a user who presses
     /// play mid-load gets paused again on the very next update.
     private var modelLoadPauseSpent = false
+    /// Whether the pause we asked for has actually been seen to happen.
+    /// Spotify reports playback changes by notification, so for a moment
+    /// after the pause lands `spotifyPlaying` is still the stale `true` we
+    /// acted on, and reading that as the user pressing play left the music
+    /// paused for good.
+    private var pauseTookEffect = false
     private var resumeWork: DispatchWorkItem?
 
     private var currentTrackID: String?
@@ -712,11 +718,15 @@ final class AudioController {
             modelLoadPauseSpent = false
             return
         }
-        // Playing again while we hold the pause means the user pressed play.
-        // They win: let it run, and stop owing a resume.
-        if pausedForModelLoad, spotifyPlaying {
-            log.notice("play pressed during the model load; leaving playback alone")
-            clearModelLoadPause()
+        if pausedForModelLoad {
+            if !spotifyPlaying {
+                pauseTookEffect = true
+            } else if pauseTookEffect {
+                // Playing again after the pause landed is the user pressing
+                // play. They win: let it run, and stop owing a resume.
+                log.notice("play pressed during the model load; leaving playback alone")
+                clearModelLoadPause()
+            }
             return
         }
         guard !modelLoadPauseSpent, spotifyPlaying else { return }
@@ -725,6 +735,7 @@ final class AudioController {
         // we did not make is not ours to undo.
         guard setSpotifyPlaying?(false) == true else { return }
         pausedForModelLoad = true
+        pauseTookEffect = false
         log.notice("paused Spotify while the separation model loads")
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.pausedForModelLoad else { return }
@@ -761,6 +772,7 @@ final class AudioController {
     }
 
     private func clearModelLoadPause() {
+        pauseTookEffect = false
         resumeGraceWork?.cancel()
         resumeGraceWork = nil
         resumeWork?.cancel()
