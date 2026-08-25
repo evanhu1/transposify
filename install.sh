@@ -58,9 +58,8 @@ cat <<EOF
 
 ✓ Installed to $DEST/$APP
 
-On first launch macOS asks for Microphone access — that's the permission Core
-Audio uses to capture Spotify's audio; it never touches your real mic. Click
-Allow, then look for the 𝄞 in your menu bar.
+Transposify walks you through the permissions it needs on first launch.
+When that is done, look for the 𝄞 in your menu bar.
 
 Uninstall:  ./uninstall.sh   (app, model, settings, caches, permissions)
 EOF

@@ -28,14 +28,15 @@ Downloading the app (option 1) is quicker but it's unsigned so you'll need to te
    This happens because the app is not signed with an Apple Developer ID,
    so macOS cannot check it. It is a one-time decision; after it the app
    opens like any other.
-5. Look for the `𝄞` in your menu bar. macOS asks for permissions on first
-   launch. **System Audio Recording** is what Core Audio uses to capture
-   Spotify's audio (older versions of macOS ask for **Microphone** instead —
-   it never touches your real microphone). **Automation** (controlling
-   Spotify) is for reading the current track and pausing Spotify for a few
-   seconds while the model loads. Allow them.
-6. To remove vocals or isolate stems, click **Download** in the popover. It
-   fetches the separation model (118 MB) once and verifies it.
+5. A setup window explains the two permissions the app needs and asks for
+   them one at a time. **Hear Spotify** is System Audio Recording, which
+   Core Audio uses to read Spotify's output. **Read what's playing** is
+   Automation, for the song title, the artwork, and pausing Spotify while
+   the separation model loads. Nothing is requested until you press a button
+   in that window.
+6. Press **Done** and the popover opens. To remove vocals or isolate stems,
+   click **Download Mix model**, above the mix controls. It fetches the
+   separation model (118 MB) once and verifies it.
 
 **Updating:** download the new `.dmg` and drag the app over the old one. Your
 settings, per-song transposes and the model stay where they are.
@@ -50,7 +51,7 @@ cd transposify
 
 That builds the app, ad-hoc-signs it, installs it to `/Applications`, and
 launches it. macOS does not quarantine apps built on the Mac they run on, so
-step 4 above does not apply. The permission prompts in step 5 do.
+step 4 above does not apply. The setup window in step 5 does.
 
 **Updating:** from the same clone used for the original install:
 
