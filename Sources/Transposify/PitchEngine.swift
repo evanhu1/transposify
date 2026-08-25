@@ -81,14 +81,14 @@ final class PitchEngine {
     /// real glitches rather than the expected start-up gap.
     func resetUnderruns() { underrunCount.set(0) }
 
-    /// Play slightly fast to give back delay the pipeline accumulated.
+    /// Play slightly fast or slow to move pipeline depth toward its target.
     ///
-    /// Rubber Band's time ratio is output duration over input duration, so a
-    /// ratio below 1 consumes the ring faster than it emits and the pipeline
-    /// gets shallower. Pitch is untouched. Held as thousandths because the
-    /// render callback reads it atomically.
+    /// Rubber Band's time ratio is output duration over input duration: below
+    /// 1 consumes the ring faster than it emits (drains depth), above 1 the
+    /// reverse (grows depth). Pitch is untouched either way. Held as
+    /// thousandths because the render callback reads it atomically.
     var timeRatio: Double = 1.0 {
-        didSet { timeRatioMilli.set(Int((max(0.9, min(1.0, timeRatio)) * 1000).rounded())) }
+        didSet { timeRatioMilli.set(Int((max(0.9, min(1.05, timeRatio)) * 1000).rounded())) }
     }
 
     /// While held, the render callback outputs silence *without draining the

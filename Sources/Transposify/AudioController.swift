@@ -352,6 +352,12 @@ final class AudioController {
     private static let governorReleaseTicks = 4
     private var governorAgreeTicks = 0
     private var governorProposed = 1.0
+    /// Wall-clock gate between ratio changes. Rubber Band re-buffers on every
+    /// change — pulling a chunk from the ring — so changes closer together
+    /// than its settle time stack transients: the depth reading dips, the
+    /// governor reads that as new deficit, changes again, and hunts (72
+    /// underruns in one contended run). Three seconds per move, symmetric.
+    private var governorLastMove = Date.distantPast
 
     private func updateGovernor(_ separation: SeparationEngine) {
         if ProcessInfo.processInfo.environment["TRANSPOSIFY_GOVERNOR"] == "0" {
@@ -368,27 +374,48 @@ final class AudioController {
             - separation.consumedCaptureFrames) / rate
         let excess = depth - targetDepth
 
+        // Proportional in both directions. Draining (excess > 0) plays fast;
+        // growing (deficit, e.g. after a burst-triggered deepening) plays slow.
+        // Both bend tempo by at most ~3%, which singing along never notices.
         let wanted: Double
         if excess > 0.5 {
             wanted = Self.governorBrisk
         } else if excess > Self.governorSlack {
             wanted = Self.governorGentle
-        } else if excess < 0.02 {
-            wanted = 1.0
+        } else if excess < -Self.governorSlack {
+            // Growing (e.g. after a burst-triggered deepening). Small and
+            // fixed: a large ratio makes Rubber Band's re-buffer transient
+            // worse, and the deficit is bounded by the deepening logic.
+            wanted = 1.015
+        } else if excess > 0.020 {
+            // Quantized micro-drain. Production pulses carry a ~40 ms/s ramp
+            // surplus, so between big governor moves depth creeps upward;
+            // without this it saw-tooths ~70 ms deep before each drain.
+            // Levels are 0.5% apart and moves are only ever one level wide:
+            // small enough that Rubber Band's re-buffer transient stays
+            // negligible, which is why these skip the dwell gate below.
+            wanted = excess > 0.050 ? 0.990 : 0.995
         } else {
-            wanted = governorRatio          // hysteresis: finish what we started
+            wanted = 1.0
         }
+        let isMicroMove = abs(wanted - governorRatio) <= 0.005 && wanted != 1.0
         if wanted == governorRatio { governorAgreeTicks = 0; governorProposed = wanted; return }
+        if wanted != governorProposed && !isMicroMove
+            && Date().timeIntervalSince(governorLastMove) < 3.0 {
+            return                          // dwell: let the last move settle
+        }
         // A new proposal has to hold for a while before it is acted on.
+        // Micro-moves act immediately — they are bounded by construction.
+        let needed = wanted == 1.0 ? Self.governorReleaseTicks : Self.governorEngageTicks
         if wanted == governorProposed {
             governorAgreeTicks += 1
         } else {
             governorProposed = wanted
-            governorAgreeTicks = 1
+            governorAgreeTicks = isMicroMove ? needed : 1
         }
-        let needed = wanted == 1.0 ? Self.governorReleaseTicks : Self.governorEngageTicks
         guard governorAgreeTicks >= needed else { return }
         governorAgreeTicks = 0
+        governorLastMove = Date()
         if wanted == 1.0 {
             releaseGovernor(depth: depth)
         } else {
@@ -396,7 +423,8 @@ final class AudioController {
             engine.timeRatio = wanted
             recorder?.governor(ratio: wanted, depth: depth, target: targetDepth)
             log.notice("""
-                governor \(String(format: "%.1f", (1 - wanted) * 100), privacy: .public)% fast: \
+                governor \(String(format: "%.1f", abs(1 - wanted) * 100), privacy: .public)% \
+                \(wanted < 1 ? "fast" : "slow"): \
                 depth \(String(format: "%.2f", depth), privacy: .public)s vs target \
                 \(String(format: "%.2f", self.targetDepth), privacy: .public)s
                 """)
@@ -839,8 +867,31 @@ final class AudioController {
             stepsSettleAt = Date().addingTimeInterval(3)
             stepsSettled = false
             let cushion = cushionSeconds
-            primeFloats = Int((cushion + separation.hopSeconds) * capture.sampleRate)
+            // The old target added a full hop on top ("the second step starts
+            // against an empty ring"). With hop auto-scaled to ~40% duty, the
+            // second step finishes inside its own hop budget by construction,
+            // so the extra hop bought depth, not safety — it charged the
+            // listener one hop at every engage.
+            //
+            // But releasing AT the cushion thins the post-release ring: the
+            // inter-publish drain leaves a saw-tooth floor near
+            // cushion+margin-hop, and that floor has to still absorb a late
+            // step on its own. So the margin adapts: whatever the hop takes
+            // from the floor beyond a 100 ms core, the margin gives back,
+            // clamped to [30 ms, one hop]. On an M4 Max this releases ~one
+            // hop sooner than before; on machines whose cushion is small
+            // relative to their hop it converges to the old deeper start.
+            // TRANSPOSIFY_PRIME_HOP=1 restores the old start for A/B.
+            let primeMargin: Double
+            if ProcessInfo.processInfo.environment["TRANSPOSIFY_PRIME_HOP"] == "1" {
+                primeMargin = separation.hopSeconds
+            } else {
+                primeMargin = max(0.030, min(separation.hopSeconds,
+                    0.100 + separation.hopSeconds - cushion))
+            }
+            primeFloats = Int((cushion + primeMargin) * capture.sampleRate)
                 * capture.channelCount
+            separation.setPublicationCap(primeFloats)
             targetDepth = separation.nominalDelay + cushion
             governorRatio = 1.0
             log.notice("""
@@ -926,6 +977,38 @@ final class AudioController {
         return "min cushion \(cushion) ms, worst hop \(Int(separation.maxStepSeconds * 1000)) ms"
     }
 
+    /// Raise the depth target when observed step bursts approach the ring's
+    /// floor. Idempotent per observation: the target only ever moves up, and
+    /// never past what the old always-deep start would have used.
+    private func deepenIfBursty(_ separation: SeparationEngine) {
+        guard let captureRate = capture?.sampleRate else { return }
+        let frames = separation.minOutputFrames
+        guard frames > 0, frames < Int.max else { return }   // Int.max = never sampled
+        let floorSeconds = Double(frames) / captureRate
+        // Session evidence only. The cushion already seeds this floor with
+        // the cross-session worst step, so counting that here too would pull
+        // every quiet session back to the old always-deep depth.
+        let worstStep = separation.maxStepSeconds
+        let wanted = worstStep + 0.040          // burst + wake-up margin
+        guard floorSeconds < wanted else { return }
+        let rate = captureRate
+        let maxTarget = separation.nominalDelay + Self.cushionCap
+        let newDepth = min(maxTarget, targetDepth + (wanted - floorSeconds))
+        guard newDepth > targetDepth + 0.005 else { return }
+        log.notice("""
+            step bursts \(String(format: "%.0f", worstStep * 1000), privacy: .public) ms vs \
+            \(String(format: "%.0f", floorSeconds * 1000), privacy: .public) ms ring floor; \
+            deepening to \(String(format: "%.2f", newDepth), privacy: .public) s
+            """)
+        targetDepth = newDepth
+        // Re-measure under the new target: minOutputFrames never resets on its
+        // own, so without this the next tick would see the old floor and keep
+        // deepening to the cap.
+        separation.resetMargins()
+        stepsSettleAt = Date().addingTimeInterval(3)
+        stepsSettled = false
+    }
+
     /// Watches the separation worker: clears `priming` once audio is flowing and
     /// surfaces a prediction failure instead of leaving the user in silence.
     private func startSeparationWatchdog() {
@@ -943,6 +1026,7 @@ final class AudioController {
             }
             if self.priming, separation.outputRing.availableToRead >= self.primeFloats {
                 self.priming = false
+                separation.setPublicationCap(nil)
                 self.engine?.hold = false
                 self.recorder?.hold(false)
                 // Underruns before this point are the start-up gap, which is
@@ -964,6 +1048,13 @@ final class AudioController {
             }
             if self.stepsSettled {
                 SeparationEngine.recordWorstStep(separation.maxStepSeconds)
+                // The shallow priming release keeps every session's latency
+                // low, but its ring floor (~cushion+margin-hop) assumes steps
+                // behave. A machine whose steps burst past the floor gets
+                // deeper here — BEFORE anything drops, while the governor
+                // still has time to hold depth there — and pays the extra
+                // latency only because it demonstrably needs it.
+                self.deepenIfBursty(separation)
             }
 
             let rate = self.capture?.sampleRate ?? 48_000
@@ -1033,6 +1124,7 @@ final class AudioController {
         }
         engine?.stop(); engine = nil
         // Stop the worker before the capture ring it reads from goes away.
+        separation?.setPublicationCap(nil)
         separation?.stop(); separation = nil
         capture?.stop(); capture = nil
         priming = false
