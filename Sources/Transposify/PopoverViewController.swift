@@ -108,9 +108,6 @@ final class PopoverViewController: NSViewController {
     private let downloadButton = NSButton()
     private lazy var downloadPill = NSStackView(views: [downloadButton])
     private let rememberSwitch = NSSwitch()
-    private let setupButton = NSButton()
-    /// Reopens the setup window. Set by the app delegate.
-    var onOpenSetup: (() -> Void)?
 
     private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
@@ -397,17 +394,7 @@ final class PopoverViewController: NSViewController {
         quit.focusRingType = .none
         quit.contentTintColor = .secondaryLabelColor
         quit.font = .systemFont(ofSize: 12)
-        setupButton.title = "Permissions"
-        setupButton.isBordered = false
-        setupButton.focusRingType = .none
-        setupButton.font = .systemFont(ofSize: 12)
-        setupButton.contentTintColor = .secondaryLabelColor
-        setupButton.target = self
-        setupButton.action = #selector(setupTapped)
-        setupButton.toolTip = "What Transposify asks macOS for, and why."
-        setupButton.setAccessibilityLabel("Open permissions setup")
-
-        let footer = NSStackView(views: [loginCheckbox, NSView(), setupButton, quit])
+        let footer = NSStackView(views: [loginCheckbox, NSView(), quit])
         footer.orientation = .horizontal
         footer.alignment = .centerY
 
@@ -466,7 +453,7 @@ final class PopoverViewController: NSViewController {
         if case .error(let message) = controller.mode {
             trackLabel.stringValue = "Audio access needed"
             trackLabel.textColor = .systemRed
-            artistLabel.stringValue = "Open Permissions below to fix it"
+            artistLabel.stringValue = "Reopen Transposify to grant it"
             artistLabel.isHidden = false
             artistLabel.toolTip = message
             trackLabel.toolTip = nil
@@ -790,7 +777,5 @@ final class PopoverViewController: NSViewController {
         LoginItem.set(loginCheckbox.state == .on)
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
     }
-    @objc private func setupTapped() { onOpenSetup?() }
-
     @objc private func quitTapped() { NSApp.terminate(nil) }
 }

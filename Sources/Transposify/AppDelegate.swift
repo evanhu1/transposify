@@ -86,10 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         popoverVC = PopoverViewController(controller: controller, spotify: spotify,
                                           artwork: artwork)
-        popoverVC.onOpenSetup = { [weak self] in
-            self?.popover.performClose(nil)
-            self?.presentSetup()
-        }
         // Prefetch on track change so the art is already there when the popover
         // opens, rather than appearing a beat later.
         artwork.onChange = { [weak self] in
@@ -150,13 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     // a version that asked at launch.
                     SetupWindowController.hasRunSetup = true
                     begin()
-                } else if SetupWindowController.hasRunSetup {
-                    // They have seen this and chosen to leave it. The popover
-                    // says what is wrong and offers the way back; opening the
-                    // window uninvited every launch would be nagging.
-                    self.controller.reportPermissionDenied()
-                    begin()
                 } else {
+                    // Always, now that nothing else reopens it: without audio
+                    // the app cannot do anything, and a silent broken menu bar
+                    // item is worse than a window explaining why.
                     self.presentSetup(then: begin)
                 }
             }
