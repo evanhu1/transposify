@@ -135,11 +135,13 @@ final class SeparationEngine {
     /// machine doesn't thrash on tiny blocks and a very slow one doesn't drift
     /// into absurd latency.
     static let dutyTarget = 0.40
-    /// 0.15, not lower: with the 3 s model a 0.12 s hop ran clean at the
-    /// median (60 ms predictions) but bursts of 100–200 ms predictions — the
-    /// GPU being borrowed by something else — pushed duty past 85% and the
-    /// worker behind. 0.15–0.16 absorbed the same bursts with no underrun.
-    static let minHopSeconds = 0.15
+    /// 0.12: at this floor a step may burst to ~200 ms (GPU borrowed) and
+    /// drain one hop's worth of margin, which the cushion covers; two full
+    /// separation pipelines sharing one GPU for a minute held 0 dropouts and
+    /// a 170+ ms ring floor on an M4 Max (bench 20260825, tools/bench.sh).
+    /// The duty-target scaling above still dominates on slower machines,
+    /// where inference/hop exceeds this clamp long before it matters.
+    static let minHopSeconds = 0.12
     static let maxHopSeconds = 2.0
 
     /// Used until the model has been loaded once and timed. Corresponds to a
@@ -526,6 +528,19 @@ final class SeparationEngine {
         }
     }
 
+    /// Soft cap on how far ahead of consumption the worker may publish while
+    /// the listener is held. Set during priming, cleared at release. Nil =
+    /// uncapped (pause holds still stage everything they can).
+    private final class CapBox: @unchecked Sendable {
+        private var value: Int?
+        private let lock = NSLock()
+        func get() -> Int? { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ v: Int?) { lock.lock(); value = v; lock.unlock() }
+    }
+    private let publicationCapFrames = CapBox()
+
+    func setPublicationCap(_ frames: Int?) { publicationCapFrames.set(frames) }
+
     /// If enough new audio has arrived, slide the window, predict, and emit.
     /// Returns false when there is nothing to do yet.
     private func stepIfReady() -> Bool {
@@ -539,8 +554,25 @@ final class SeparationEngine {
         // Pace on output-ring room. While the render side is held (pause),
         // nothing drains; predicting anyway would overflow the ring and DROP
         // finished audio. Waiting keeps it safe in staging instead.
-        let neededRoom = (hopCaptureFrames + 64) * channels
-        guard outputRing.availableToWrite >= neededRoom else { return false }
+        //
+        // `publicationCap` (priming only): while the listener is still held,
+        // every published hop lands in a ring nobody drains, and the release
+        // threshold then has to wait for that whole pile — charging the
+        // listener one extra hop of depth at engage. Capping publication at
+        // the priming target keeps the first audible moment at the cushion
+        // instead of cushion+hop; the safety margin regrows within seconds
+        // from the ramp surplus once rendering starts.
+        let neededRoom: Int
+        if let cap = publicationCapFrames.get() {
+            // Ring occupancy is what priming is pacing on; during hold it
+            // equals everything ever published.
+            let room = max(0, cap - outputRing.availableToRead / channels)
+            neededRoom = min((hopCaptureFrames + 64) * channels, room * channels)
+            if neededRoom <= 0 { return false }
+        } else {
+            neededRoom = (hopCaptureFrames + 64) * channels
+            guard outputRing.availableToWrite >= neededRoom else { return false }
+        }
 
         slideWindow(by: needed)
         stagingL.removeFirst(needed)
