@@ -26,10 +26,77 @@ final class TransposeSliderCell: NSSliderCell {
     }
 }
 
+/// Tracks the pointer for the footer controls. The footer sits in grey the
+/// eye reads as chrome, so each control brightens under the pointer to say it
+/// is a control at all.
+private final class HoverTracker {
+    private(set) var hovering = false
+
+    /// Rebuilds the tracking area on the view; call from `updateTrackingAreas`.
+    func attach(to view: NSView) {
+        view.trackingAreas.forEach(view.removeTrackingArea)
+        view.addTrackingArea(NSTrackingArea(
+            rect: view.bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: view))
+    }
+
+    /// Returns true when the state changed, so the caller can redraw once.
+    func set(_ value: Bool) -> Bool {
+        guard value != hovering else { return false }
+        hovering = value
+        return true
+    }
+}
+
+/// A borderless footer button that brightens under the pointer.
+private final class FooterButton: NSButton {
+    private let tracker = HoverTracker()
+    private var restTint: NSColor = .secondaryLabelColor
+
+    /// Set instead of `contentTintColor`, which the hover swaps out.
+    func setTints(rest: NSColor) {
+        restTint = rest
+        applyTint()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        tracker.attach(to: self)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if tracker.set(isEnabled) { applyTint() }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if tracker.set(false) { applyTint() }
+    }
+
+    private func applyTint() {
+        contentTintColor = tracker.hovering ? .labelColor : restTint
+    }
+}
+
 /// A deliberately quiet checkbox for footer actions. AppKit's standard
 /// checkbox reverses to a bright fill in dark mode; this keeps the selected
 /// state dark with a soft white check instead.
 private final class FooterCheckbox: NSButton {
+    private let tracker = HoverTracker()
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        tracker.attach(to: self)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if tracker.set(isEnabled) { needsDisplay = true }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if tracker.set(false) { needsDisplay = true }
+    }
+
     override var intrinsicContentSize: NSSize {
         let titleSize = (title as NSString).size(withAttributes: [
             .font: NSFont.systemFont(ofSize: 12),
@@ -44,8 +111,9 @@ private final class FooterCheckbox: NSButton {
                              width: boxSize, height: boxSize)
         let box = NSBezierPath(roundedRect: boxRect, xRadius: 3, yRadius: 3)
 
+        let hovering = tracker.hovering
         if state == .on {
-            NSColor(calibratedWhite: 0.18, alpha: 0.9).setFill()
+            NSColor(calibratedWhite: 0.18, alpha: hovering ? 1 : 0.9).setFill()
             box.fill()
 
             let check = NSBezierPath()
@@ -55,17 +123,17 @@ private final class FooterCheckbox: NSButton {
             check.move(to: NSPoint(x: 2.8, y: boxRect.midY))
             check.line(to: NSPoint(x: 5.4, y: boxRect.maxY - 3.2))
             check.line(to: NSPoint(x: 10.3, y: boxRect.minY + 3.1))
-            NSColor(white: 1, alpha: 0.82).setStroke()
+            NSColor(white: 1, alpha: hovering ? 1 : 0.82).setStroke()
             check.stroke()
         } else {
-            NSColor.tertiaryLabelColor.setStroke()
+            (hovering ? NSColor.secondaryLabelColor : .tertiaryLabelColor).setStroke()
             box.lineWidth = 1
             box.stroke()
         }
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .foregroundColor: hovering ? NSColor.labelColor : .secondaryLabelColor,
         ]
         let titleSize = (title as NSString).size(withAttributes: attributes)
         let titleRect = NSRect(x: boxRect.maxX + 5,
@@ -74,6 +142,68 @@ private final class FooterCheckbox: NSButton {
                                height: titleSize.height)
         (title as NSString).draw(in: titleRect, withAttributes: attributes)
     }
+}
+
+/// GitHub's mark, as the outline Primer publishes for it at 16 x 16 (MIT).
+/// The arc and shorthand curves are converted to plain cubics, so the reader
+/// below only has to know "M", "C" and "Z".
+private let githubMarkPath = """
+    M 6.766 11.328 C 4.703 11.078 3.25 9.594 3.25 7.672 C 3.25 6.891
+    3.531 6.047 4 5.484 C 3.797 4.969 3.828 3.875 4.063 3.422 C 4.688
+    3.344 5.531 3.672 6.031 4.125 C 6.625 3.938 7.25 3.844 8.016 3.844 C
+    8.781 3.844 9.406 3.938 9.969 4.109 C 10.453 3.672 11.313 3.344
+    11.938 3.422 C 12.156 3.844 12.188 4.937 11.984 5.469 C 12.484 6.062
+    12.75 6.859 12.75 7.672 C 12.75 9.594 11.297 11.047 9.203 11.312 C
+    9.734 11.656 10.093 12.406 10.093 13.266 C 10.093 13.266 10.093
+    14.891 10.093 14.891 C 10.093 15.359 10.484 15.625 10.953 15.438 C
+    13.781 14.359 16 11.53 16 8.03 C 16 3.61 12.406 0 7.984 0 C 3.563 0
+    0 3.61 0 8.031 C -0.009 11.347 2.058 14.314 5.172 15.453 C 5.594
+    15.609 6 15.328 6 14.906 C 6 14.906 6 13.656 6 13.656 C 5.781 13.75
+    5.5 13.812 5.25 13.812 C 4.219 13.812 3.61 13.25 3.172 12.203 C 3
+    11.781 2.812 11.531 2.453 11.484 C 2.266 11.469 2.203 11.391 2.203
+    11.297 C 2.203 11.109 2.516 10.969 2.828 10.969 C 3.281 10.969 3.672
+    11.25 4.078 11.829 C 4.391 12.281 4.718 12.484 5.109 12.484 C 5.5
+    12.484 5.75 12.344 6.109 11.984 C 6.375 11.719 6.579 11.484 6.766
+    11.328 Z
+"""
+
+/// Draws the mark as a template image, so the button takes the tint of the
+/// footer text it sits beside in both appearances.
+private func githubMarkImage(size: CGFloat) -> NSImage {
+    let scale = size / 16
+    let path = NSBezierPath()
+    var command: Character = "M"
+    var values: [CGFloat] = []
+    // SVG counts y downwards; flip each point into AppKit's coordinates.
+    func point(_ i: Int) -> NSPoint {
+        NSPoint(x: values[i] * scale, y: size - values[i + 1] * scale)
+    }
+    for token in githubMarkPath.split(whereSeparator: \.isWhitespace) {
+        guard let value = Double(token) else {
+            command = token.first ?? "Z"
+            if command == "Z" { path.close() }
+            continue
+        }
+        values.append(value)
+        switch command {
+        case "M" where values.count == 2:
+            path.move(to: point(0))
+            values.removeAll()
+        case "C" where values.count == 6:
+            path.curve(to: point(4), controlPoint1: point(0), controlPoint2: point(2))
+            values.removeAll()
+        default:
+            break
+        }
+    }
+
+    let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
+        NSColor.black.setFill()
+        path.fill()
+        return true
+    }
+    image.isTemplate = true
+    return image
 }
 
 /// The popup shown from the menu bar: now-playing, a one-knob pitch control,
@@ -111,6 +241,8 @@ final class PopoverViewController: NSViewController {
 
     private let loginCheckbox = FooterCheckbox(
         checkboxWithTitle: "Launch at login", target: nil, action: nil)
+    private let githubButton = FooterButton(
+        image: githubMarkImage(size: 14), target: nil, action: nil)
     private var minusButton: NSButton!
     private var plusButton: NSButton!
 
@@ -290,6 +422,13 @@ final class PopoverViewController: NSViewController {
         loginCheckbox.action = #selector(loginToggled)
         loginCheckbox.setContentHuggingPriority(.required, for: .horizontal)
         loginCheckbox.setContentCompressionResistancePriority(.required, for: .horizontal)
+        githubButton.isBordered = false
+        githubButton.focusRingType = .none
+        githubButton.setTints(rest: .secondaryLabelColor)
+        githubButton.toolTip = "See the source on GitHub"
+        githubButton.target = self
+        githubButton.action = #selector(githubTapped)
+        githubButton.setContentHuggingPriority(.required, for: .horizontal)
 
         // Mix ----------------------------------------------------------
         // One piece of state, shown twice. The chips name the three common
@@ -386,14 +525,15 @@ final class PopoverViewController: NSViewController {
                                     tooltip: "Re-apply this transpose automatically next time the song plays.")
 
         // Footer -----------------------------------------------------------
-        let quit = NSButton(title: "Quit", target: self, action: #selector(quitTapped))
+        let quit = FooterButton(title: "Quit", target: self, action: #selector(quitTapped))
         quit.isBordered = false
         quit.focusRingType = .none
-        quit.contentTintColor = .secondaryLabelColor
         quit.font = .systemFont(ofSize: 12)
-        let footer = NSStackView(views: [loginCheckbox, NSView(), quit])
+        quit.setTints(rest: .secondaryLabelColor)
+        let footer = NSStackView(views: [loginCheckbox, githubButton, NSView(), quit])
         footer.orientation = .horizontal
         footer.alignment = .centerY
+        footer.setCustomSpacing(10, after: loginCheckbox)
 
         // Assemble ---------------------------------------------------------
         let divider1 = separator()
@@ -771,5 +911,10 @@ final class PopoverViewController: NSViewController {
         LoginItem.set(loginCheckbox.state == .on)
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
     }
+    @objc private func githubTapped() {
+        guard let url = URL(string: "https://github.com/evanhu1/transposify") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func quitTapped() { NSApp.terminate(nil) }
 }
