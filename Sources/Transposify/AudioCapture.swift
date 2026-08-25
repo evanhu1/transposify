@@ -42,7 +42,13 @@ final class AudioCapture {
     private let spotifyBundleID = "com.spotify.client"
     private let recorder: SessionRecorder?
 
-    init(recorder: SessionRecorder? = nil) {
+    /// Muting Spotify while tapped is what makes the live pipeline the only
+    /// thing you hear. A permission probe must not do that, so it taps
+    /// unmuted and nobody notices it ran.
+    private let muted: Bool
+
+    init(recorder: SessionRecorder? = nil, muted: Bool = true) {
+        self.muted = muted
         self.recorder = recorder
         // Sized for the worst case (scratchFrameCapacity frames × up to 8 ch).
         interleaveScratch = .allocate(capacity: scratchFrameCapacity * 8)
@@ -61,28 +67,29 @@ final class AudioCapture {
     /// download, on top of the popover, which closed it. A global tap that
     /// is created and destroyed at once triggers the same prompt at launch,
     /// where a dialog is expected. Blocks until the user answers.
-    /// Try to create a tap and throw it away, reporting whether it worked.
+    /// Whether the app can actually capture Spotify, and the thing that makes
+    /// macOS ask if it has not been asked.
     ///
-    /// This is both the question and the answer: the first call is what makes
-    /// macOS ask for System Audio Recording, and every call after reports
-    /// whether the grant is in place. There is no API that reads it.
-    @discardableResult
-    static func canTap() -> Bool {
-        // A global tap does not trip the check; a tap on a process does. Tap
-        // Spotify if it is running, otherwise this process. Unmuted, so
-        // nothing goes silent while it exists.
-        let pid = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == "com.spotify.client" })?
-            .processIdentifier ?? ProcessInfo.processInfo.processIdentifier
-        guard let object = try? processObject(forPID: pid) else { return false }
-        let desc = CATapDescription(stereoMixdownOfProcesses: [object])
-        desc.name = "Transposify Permission Probe"
-        desc.isPrivate = true
-        desc.muteBehavior = .unmuted
-        var tap = AudioObjectID(kAudioObjectUnknown)
-        guard AudioHardwareCreateProcessTap(desc, &tap) == noErr else { return false }
-        AudioHardwareDestroyProcessTap(tap)
-        return true
+    /// Creating a tap is not the check. A tap can be made with no permission
+    /// at all; what macOS gates is starting the device and receiving frames,
+    /// which is why the dialog used to arrive when the pipeline engaged rather
+    /// than during setup. So the probe does the whole thing: tap, aggregate
+    /// device, IO proc, start, wait for frames, tear down. Unmuted, so Spotify
+    /// keeps playing while it runs.
+    static func canCapture() -> Bool {
+        let capture = AudioCapture(muted: false)
+        do {
+            try capture.start()
+        } catch {
+            log.notice("audio probe could not start: \(String(describing: error), privacy: .public)")
+            return false
+        }
+        // Long enough for the device to deliver at least one buffer.
+        Thread.sleep(forTimeInterval: 0.4)
+        let frames = capture.ring.availableToRead
+        capture.stop()
+        log.notice("audio probe captured \(frames, privacy: .public) floats")
+        return frames > 0
     }
 
     func start() throws {
@@ -97,7 +104,7 @@ final class AudioCapture {
         let desc = CATapDescription(stereoMixdownOfProcesses: [processObject])
         desc.name = "Transposify Tap"
         desc.isPrivate = true
-        desc.muteBehavior = .mutedWhenTapped
+        desc.muteBehavior = muted ? .mutedWhenTapped : .unmuted
 
         var newTap = AudioObjectID(kAudioObjectUnknown)
         let tapStatus = AudioHardwareCreateProcessTap(desc, &newTap)

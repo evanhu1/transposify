@@ -55,11 +55,33 @@ enum Permission {
         }
     }
 
-    /// Probing creates a tap, which *asks* the first time. Only call it once
-    /// the question has been put, or as part of putting it.
+    /// The last probe's answer. Probing is a real capture, so it is done on
+    /// demand rather than every time something wants to know.
+    private static var probed: State?
+
+    /// Run the probe and remember the answer. Before the question has ever
+    /// been put this *is* the question, so callers must only run it when the
+    /// user has asked for it — otherwise a dialog appears unbidden, which is
+    /// the whole thing this flow exists to avoid.
+    static func checkAudio(_ completion: ((State) -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let state: State = AudioCapture.canCapture() ? .allowed : .denied
+            DispatchQueue.main.async {
+                probed = state
+                completion?(state)
+            }
+        }
+    }
+
+    /// Refresh the answer only when doing so cannot prompt.
+    static func refreshAudioIfSettled() {
+        guard audioAsked, probed == nil else { return }
+        checkAudio()
+    }
+
     static var systemAudio: State {
-        guard audioAsked else { return .notAsked }
-        return AudioCapture.canTap() ? .allowed : .denied
+        if let probed { return probed }
+        return audioAsked ? .denied : .notAsked
     }
 
     /// Whether the app can hear Spotify, which is the only thing a person
@@ -74,21 +96,24 @@ enum Permission {
     static func requestAudio(_ completion: @escaping (State) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             audioAsked = true
-            if AudioCapture.canTap() {
-                DispatchQueue.main.async { completion(.allowed) }
+            if AudioCapture.canCapture() {
+                DispatchQueue.main.async {
+                    probed = .allowed
+                    completion(.allowed)
+                }
                 return
             }
             // Older systems gate the tap on Microphone as well. Nothing else
             // explains a refusal we did not get a dialog for, so ask, and try
             // once more.
             guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
-                DispatchQueue.main.async { completion(.denied) }
+                DispatchQueue.main.async { probed = .denied; completion(.denied) }
                 return
             }
             log.notice("tap refused; falling back to asking for microphone access")
             AVCaptureDevice.requestAccess(for: .audio) { _ in
-                let state: State = AudioCapture.canTap() ? .allowed : .denied
-                DispatchQueue.main.async { completion(state) }
+                let state: State = AudioCapture.canCapture() ? .allowed : .denied
+                DispatchQueue.main.async { probed = state; completion(state) }
             }
         }
     }

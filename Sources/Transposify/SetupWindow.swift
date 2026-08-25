@@ -14,7 +14,10 @@ import AppKit
 /// times as hungry as it is.
 final class SetupWindowController: NSWindowController, NSWindowDelegate {
     private let spotify: SpotifyState
-    private let onFinish: () -> Void
+    /// Called when the window closes, saying whether setup was finished
+    /// rather than simply dismissed.
+    private let onFinish: (Bool) -> Void
+    private var completed = false
 
     private var audioRow: PermissionRow!
     private var spotifyRow: PermissionRow!
@@ -29,7 +32,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         set { UserDefaults.standard.set(newValue, forKey: completedKey) }
     }
 
-    init(spotify: SpotifyState, onFinish: @escaping () -> Void) {
+    init(spotify: SpotifyState, onFinish: @escaping (Bool) -> Void) {
         self.spotify = spotify
         self.onFinish = onFinish
         let window = NSWindow(
@@ -68,7 +71,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         // A menu-bar app has no business keeping a Dock icon once its one
         // window is gone.
         NSApp.setActivationPolicy(.accessory)
-        onFinish()
+        onFinish(completed)
     }
 
     // MARK: - Content
@@ -138,6 +141,8 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
     private func refresh() {
         // Nothing has started Spotify monitoring yet at this point in launch.
         spotify.refreshRunningState()
+        // Safe here: it only runs when the question has already been put.
+        Permission.refreshAudioIfSettled()
         audioRow.apply(Permission.audio, settings: Permission.audioPane)
         spotifyRow.apply(Permission.spotifyControl(spotify), settings: .automation)
         // "Continue" once the required grant is in; until then the honest word
@@ -214,6 +219,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func finish() {
         Self.hasRunSetup = true
+        completed = true
         window?.performClose(nil)
     }
 }

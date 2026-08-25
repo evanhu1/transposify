@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_SETUP_SNAPSHOT"] {
-            let window = SetupWindowController(spotify: spotify) {}
+            let window = SetupWindowController(spotify: spotify) { _ in }
             window.present()
             for _ in 0..<30 { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02)) }
             if let content = window.window?.contentView,
@@ -140,10 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 playing \(self?.spotify.isPlaying == true, privacy: .public)
                 """)
         }
-        // Probing audio access touches Core Audio, which must not happen on
-        // the main thread during launch.
-        DispatchQueue.global(qos: .userInitiated).async {
-            let allowed = Permission.audio.isAllowed
+        // Settle the audio answer before deciding, but only where doing so
+        // cannot put a question: probing is a real capture, and for a user
+        // who has never been asked that would be a dialog out of nowhere.
+        let decide: (Bool) -> Void = { allowed in
             DispatchQueue.main.async {
                 if allowed {
                     // Nothing to explain, including for anyone upgrading from
@@ -161,6 +161,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             }
         }
+        if Permission.audioAsked {
+            Permission.checkAudio { decide($0.isAllowed) }
+        } else {
+            decide(false)
+        }
     }
 
     /// Show setup, and carry on once it closes either way — a person who
@@ -170,12 +175,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             setupWindow.present()
             return
         }
-        let window = SetupWindowController(spotify: spotify) { [weak self] in
+        let window = SetupWindowController(spotify: spotify) { [weak self] completed in
             guard let self else { return }
             self.setupWindow = nil
             if !Permission.audio.isAllowed { self.controller.reportPermissionDenied() }
             done?()
             self.refreshUI()
+            // Finishing setup should end somewhere, and the somewhere is the
+            // thing they have just been given permission to use. A short wait
+            // lets the window finish closing and the app drop back to being
+            // an accessory before the popover is shown.
+            guard completed else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.showPopover()
+            }
         }
         setupWindow = window
         window.present()
@@ -213,6 +226,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                                  playing: spotify.isPlaying,
                                  trackID: spotify.current?.id)
         refreshUI()
+    }
+
+    private func showPopover() {
+        guard !popover.isShown else { return }
+        togglePopover()
     }
 
     @objc private func togglePopover() {
