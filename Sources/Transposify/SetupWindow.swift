@@ -141,14 +141,15 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         // "Continue" once the required grant is in; until then the honest word
         // is that they can leave and come back.
         let ready = Permission.audio.isAllowed
+            && Permission.spotifyControl(spotify).isAllowed
         titleLabel.stringValue = ready
             ? "Transposify is ready"
             : "Grant Transposify permissions"
         primaryButton.title = ready ? "Done" : "Continue"
-        // Nothing to continue to until the app can hear Spotify.
+        // Both are needed, so there is nothing to continue to until both are.
         primaryButton.isEnabled = ready
         primaryButton.setAccessibilityHelp(ready
-            ? nil : "Available once audio access is granted.")
+            ? nil : "Available once both permissions are granted.")
     }
 
     @objc private func allowAudio() {
@@ -171,21 +172,45 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func allowSpotify() {
         if spotifyRow.openSettingsIfDenied() { return }
+        // macOS cannot be asked about an app that is not running, so open
+        // Spotify first and put the question once it is up. Pressing the
+        // button is then the whole instruction, with nothing to read.
+        guard spotify.isRunning else {
+            spotifyRow.setBusy(true)
+            openSpotifyThenAsk()
+            return
+        }
         // Sending one Apple Event is what makes macOS ask.
-        Permission.spotifySkipped = false
         spotify.refreshNowPlaying()
         refresh()
     }
 
+    private func openSpotifyThenAsk(attempt: Int = 0) {
+        if attempt == 0,
+           let url = NSWorkspace.shared.urlForApplication(
+               withBundleIdentifier: "com.spotify.client") {
+            NSWorkspace.shared.openApplication(at: url,
+                                               configuration: NSWorkspace.OpenConfiguration())
+        }
+        // Spotify's scripting interface is not up the instant it launches.
+        guard attempt < 24 else {
+            spotifyRow.setBusy(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            if self.spotify.isRunning, attempt > 2 {
+                self.spotifyRow.setBusy(false)
+                self.spotify.refreshNowPlaying()
+                self.refresh()
+            } else {
+                self.openSpotifyThenAsk(attempt: attempt + 1)
+            }
+        }
+    }
+
     @objc private func finish() {
         Self.hasRunSetup = true
-        // Leaving without granting Spotify control is a decision, and it is
-        // kept: the app will not put the question again on its own.
-        if case .allowed = Permission.spotifyControl(spotify) {
-            Permission.spotifySkipped = false
-        } else {
-            Permission.spotifySkipped = true
-        }
         window?.performClose(nil)
     }
 }

@@ -95,24 +95,9 @@ enum Permission {
 
     // MARK: - Reading what is playing
 
-    /// Set when setup is finished without granting Spotify control. macOS
-    /// only asks once, and the ask is triggered by sending an Apple Event —
-    /// so without this the app would put the question again the next time it
-    /// wanted the artwork, which is exactly the surprise prompt this flow
-    /// exists to remove.
-    private static let spotifySkippedKey = "spotifyControlSkipped"
-
-    static var spotifySkipped: Bool {
-        get { UserDefaults.standard.bool(forKey: spotifySkippedKey) }
-        set { UserDefaults.standard.set(newValue, forKey: spotifySkippedKey) }
-    }
-
-    /// Whether the app may send Spotify an Apple Event unprompted.
-    static var mayAskSpotify: Bool { !spotifySkipped }
-
-    /// Optional. Playback notifications carry the track and the play state, so
-    /// without this the app still transposes; it loses the artwork, the first
-    /// snapshot of what is playing, and the pause while the model loads.
+    /// Reading the current track, its artwork, and pausing Spotify while the
+    /// model loads. Setup treats this as needed rather than nice to have, so
+    /// it is asked for in the flow rather than turning up unannounced later.
     static func spotifyControl(_ spotify: SpotifyState) -> State {
         guard spotify.isRunning else {
             return .unavailable("Open Spotify to ask for this.")
