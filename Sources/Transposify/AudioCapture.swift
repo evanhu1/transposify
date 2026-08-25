@@ -61,6 +61,24 @@ final class AudioCapture {
     /// download, on top of the popover, which closed it. A global tap that
     /// is created and destroyed at once triggers the same prompt at launch,
     /// where a dialog is expected. Blocks until the user answers.
+    /// Whether a tap can be created right now, without asking. Only
+    /// meaningful once the question has been put — before that, creating a
+    /// tap is what puts it.
+    static func canTap() -> Bool {
+        let pid = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == "com.spotify.client" })?
+            .processIdentifier ?? ProcessInfo.processInfo.processIdentifier
+        guard let object = try? processObject(forPID: pid) else { return false }
+        let desc = CATapDescription(stereoMixdownOfProcesses: [object])
+        desc.name = "Transposify Permission Probe"
+        desc.isPrivate = true
+        desc.muteBehavior = .unmuted
+        var tap = AudioObjectID(kAudioObjectUnknown)
+        guard AudioHardwareCreateProcessTap(desc, &tap) == noErr else { return false }
+        AudioHardwareDestroyProcessTap(tap)
+        return true
+    }
+
     static func requestAuthorization() {
         // A global tap does not trip the check; a tap on a process does. Tap
         // Spotify if it is running, otherwise this process — either one asks

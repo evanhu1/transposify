@@ -18,6 +18,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
 
+        if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_SETUP_SNAPSHOT"] {
+            let window = SetupWindowController(spotify: spotify) {}
+            window.present()
+            for _ in 0..<30 { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02)) }
+            if let content = window.window?.contentView,
+               let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: path))
+            }
+            exit(0)
+        }
+
         if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_SNAPSHOT"] {
             snapshotPopover(to: path)
             return
@@ -73,6 +86,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         popoverVC = PopoverViewController(controller: controller, spotify: spotify,
                                           artwork: artwork)
+        popoverVC.onOpenSetup = { [weak self] in
+            self?.popover.performClose(nil)
+            self?.presentSetup()
+        }
         // Prefetch on track change so the art is already there when the popover
         // opens, rather than appearing a beat later.
         artwork.onChange = { [weak self] in
@@ -107,6 +124,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// Process taps are gated on Microphone (kTCCServiceMicrophone) access.
     /// Begin monitoring Spotify once we know the permission outcome.
+    private var setupWindow: SetupWindowController?
+
+    /// Nothing is asked of macOS until the setup window asks it. The raw
+    /// prompts used to fire at launch with no explanation, and a third
+    /// appeared later when Spotify was first queried — three system dialogs,
+    /// one of them naming the microphone, for an app that never opens one.
     private func requestMicrophoneThenStart() {
         let begin: () -> Void = { [weak self] in
             self?.spotify.start()
@@ -117,32 +140,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 playing \(self?.spotify.isPlaying == true, privacy: .public)
                 """)
         }
-        // System Audio Recording is the permission the tap actually needs;
-        // ask for it here, off the main thread since the prompt blocks, and
-        // only then start. Microphone follows for the macOS versions that
-        // still gate the tap on it.
-        let afterCapture: () -> Void = {
-            let status = AVCaptureDevice.authorizationStatus(for: .audio)
-            log.notice("launched; microphone authorization = \(status.rawValue, privacy: .public)")
-            switch status {
-            case .authorized:
-                begin()
-            case .notDetermined:
-                AVCaptureDevice.requestAccess(for: .audio) { granted in
-                    DispatchQueue.main.async {
-                        if !granted { self.controller.reportPermissionDenied() }
-                        begin()
-                    }
+        // Probing audio access touches Core Audio, which must not happen on
+        // the main thread during launch.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let allowed = Permission.audio.isAllowed
+            DispatchQueue.main.async {
+                if allowed {
+                    // Nothing to explain, including for anyone upgrading from
+                    // a version that asked at launch.
+                    SetupWindowController.hasRunSetup = true
+                    begin()
+                } else if SetupWindowController.hasRunSetup {
+                    // They have seen this and chosen to leave it. The popover
+                    // says what is wrong and offers the way back; opening the
+                    // window uninvited every launch would be nagging.
+                    self.controller.reportPermissionDenied()
+                    begin()
+                } else {
+                    self.presentSetup(then: begin)
                 }
-            default:
-                self.controller.reportPermissionDenied()
-                begin()
             }
         }
-        DispatchQueue.global(qos: .userInitiated).async {
-            AudioCapture.requestAuthorization()
-            DispatchQueue.main.async(execute: afterCapture)
+    }
+
+    /// Show setup, and carry on once it closes either way — a person who
+    /// closes it should still get a working menu bar item.
+    func presentSetup(then done: (() -> Void)? = nil) {
+        if let setupWindow {
+            setupWindow.present()
+            return
         }
+        let window = SetupWindowController(spotify: spotify) { [weak self] in
+            guard let self else { return }
+            self.setupWindow = nil
+            if !Permission.audio.isAllowed { self.controller.reportPermissionDenied() }
+            done?()
+            self.refreshUI()
+        }
+        setupWindow = window
+        window.present()
     }
 
     /// Env-gated affordances for headless testing (no-ops in normal use).

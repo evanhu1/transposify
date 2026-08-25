@@ -68,7 +68,7 @@ final class SpotifyState {
     }
 
     private func queryInitialState() {
-        guard isRunning else { return }
+        guard isRunning, Permission.mayAskSpotify else { return }
         // Variable names matter here: `st` is reserved and makes the whole
         // script fail to compile, which silently left the initial snapshot
         // empty until the next play/pause notification arrived.
@@ -92,7 +92,7 @@ final class SpotifyState {
     /// prompt, and it also recovers without a relaunch if permission is granted
     /// in System Settings after the fact.
     func refreshNowPlaying() {
-        guard isRunning else { return }
+        guard isRunning, Permission.mayAskSpotify else { return }
         queryInitialState()
         onChange?()
     }
