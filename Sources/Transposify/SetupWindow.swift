@@ -106,7 +106,7 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
 
         audioRow = SetupRow(
             step: 2,
-            title: "Hear Spotify",
+            title: "Let Transposify hear Spotify",
             detail: "Reads the audio Spotify is playing so it can be shifted. "
                 + "macOS calls this System Audio Recording.",
             action: #selector(allowAudio),

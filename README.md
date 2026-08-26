@@ -30,10 +30,11 @@ Downloading the app (option 1) is quicker but it's unsigned so you'll need to te
    opens like any other.
 5. A setup window walks through three steps. **Open Spotify** comes first:
    both permissions are answered by talking to Spotify, so it must be
-   running. **Hear Spotify** is System Audio Recording, which Core Audio uses
-   to read Spotify's output. **Read what's playing** is Automation, for the
-   song title, the artwork, and pausing Spotify while the separation model
-   loads. Nothing is requested until you press a button in that window.
+   running. **Let Transposify hear Spotify** is System Audio Recording,
+   which Core Audio uses to read Spotify's output. **Read what's playing**
+   is Automation, for the song title, the artwork, and pausing Spotify
+   while the separation model loads. Nothing is requested until you press
+   a button in that window.
 6. Press **Done** and the popover opens. To remove vocals or isolate stems,
    click **Download Mix model**, above the mix controls. It fetches the
    separation model (118 MB) once and verifies it.
