@@ -611,7 +611,17 @@ final class AudioController {
 
     func reportPermissionDenied() {
         permissionDenied = true
-        log.error("microphone access denied")
+        log.error("audio capture access denied")
+        onChange?()
+    }
+
+    /// Setup can be dismissed while access is denied and completed later.
+    /// Clear the cached UI error as soon as that recovery succeeds.
+    func reportPermissionAllowed() {
+        guard permissionDenied else { return }
+        permissionDenied = false
+        log.notice("audio capture access restored")
+        updateEngagement()
         onChange?()
     }
 
@@ -1165,8 +1175,14 @@ final class AudioController {
 
     var mode: Mode {
         if permissionDenied {
-            return .error("Microphone access needed \u{2014} enable it in System Settings "
-                + "\u{25B8} Privacy & Security \u{25B8} Microphone, then reopen.")
+            let pane: String
+            switch Permission.audioPane {
+            case .microphone: pane = "Microphone"
+            case .audioRecording: pane = "System Audio Recording"
+            case .automation: pane = "Automation"
+            }
+            return .error("\(pane) access needed \u{2014} enable it in System Settings "
+                + "\u{25B8} Privacy & Security \u{25B8} \(pane), then reopen.")
         }
         if !spotifyRunning { return .notRunning }
         if !enabled { return spotifyPlaying ? .original : .paused }

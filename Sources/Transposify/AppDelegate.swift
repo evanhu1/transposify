@@ -13,13 +13,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        if ProcessInfo.processInfo.environment["TRANSPOSIFY_ONBOARDING_UI_TEST"] == "1" {
+            OnboardingUITest.run(spotify: spotify)
+        }
+
         if ProcessInfo.processInfo.environment["TRANSPOSIFY_SELFTEST"] == "1" {
             SelfTest.run(controller)
             return
         }
 
         if let path = ProcessInfo.processInfo.environment["TRANSPOSIFY_SETUP_SNAPSHOT"] {
-            let window = SetupWindowController(spotify: spotify) { _ in }
+            let scenarioName = ProcessInfo.processInfo.environment[
+                "TRANSPOSIFY_SETUP_SCENARIO"]
+            let scenario = scenarioName.flatMap(SetupScenario.init(rawValue:))
+            if let scenarioName, scenario == nil {
+                FileHandle.standardError.write(
+                    "Unknown onboarding scenario: \(scenarioName)\n".data(using: .utf8)!)
+                exit(2)
+            }
+            let window = SetupWindowController(spotify: spotify,
+                                               fixedState: scenario?.input) { _ in }
+            switch ProcessInfo.processInfo.environment["TRANSPOSIFY_SETUP_APPEARANCE"] {
+            case "light": window.window?.appearance = NSAppearance(named: .aqua)
+            case "dark": window.window?.appearance = NSAppearance(named: .darkAqua)
+            default: break
+            }
             window.present()
             for _ in 0..<30 { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02)) }
             if let content = window.window?.contentView,
@@ -189,7 +207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let window = SetupWindowController(spotify: spotify) { [weak self] completed in
             guard let self else { return }
             self.setupWindow = nil
-            if !Permission.audio.isAllowed { self.controller.reportPermissionDenied() }
+            if Permission.audio.isAllowed {
+                self.controller.reportPermissionAllowed()
+            } else {
+                self.controller.reportPermissionDenied()
+            }
             done?()
             self.refreshUI()
             // Finishing setup should end somewhere, and the somewhere is the
@@ -249,6 +271,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            // Closing the first-run window is allowed, but it must not strand
+            // the user or make the next click raise an unexplained Automation
+            // prompt. The menu-bar icon is the natural way back into setup.
+            guard !SetupFlow.shouldPresentFromMenu(
+                setupCompleted: SetupWindowController.hasRunSetup,
+                audio: Permission.audio) else {
+                presentSetup()
+                return
+            }
             // Playback notifications keep now-playing current; the Apple
             // Events query is only for the first look, and for recovering
             // once Automation is granted after the fact.

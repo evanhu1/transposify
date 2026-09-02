@@ -2,6 +2,9 @@ import AppKit
 import ServiceManagement
 
 // Headless checks; never run in normal use.
+if ProcessInfo.processInfo.environment["TRANSPOSIFY_ONBOARDING_TEST"] == "1" {
+    OnboardingTest.run()
+}
 if ProcessInfo.processInfo.environment["TRANSPOSIFY_UNREGISTER_LOGIN"] == "1" {
     // uninstall.sh: only the app can remove its own launch-at-login entry.
     // Unconditional — the status read from a bare launch is not reliable.

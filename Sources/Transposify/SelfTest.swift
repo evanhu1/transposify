@@ -102,6 +102,20 @@ enum SelfTest {
         var results: [(String, Bool, String)] = []
 
         func finish() {
+            controller.reportPermissionDenied()
+            if case .error = controller.mode {
+                results.append(("Denied audio is visible", true, ""))
+            } else {
+                results.append(("Denied audio is visible", false,
+                                "controller did not expose an error"))
+            }
+            controller.reportPermissionAllowed()
+            if case .error = controller.mode {
+                results.append(("Recovered audio clears the stale error", false,
+                                "controller still exposed an error"))
+            } else {
+                results.append(("Recovered audio clears the stale error", true, ""))
+            }
             // cleanup any persisted self-test entries
             controller.setRemember(false)
             let err = FileHandle.standardError

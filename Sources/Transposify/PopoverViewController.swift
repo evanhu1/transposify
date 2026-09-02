@@ -590,7 +590,7 @@ final class PopoverViewController: NSViewController {
         if case .error(let message) = controller.mode {
             trackLabel.stringValue = "Audio access needed"
             trackLabel.textColor = .systemRed
-            artistLabel.stringValue = "Reopen Transposify to grant it"
+            artistLabel.stringValue = "Reopen this menu to finish setup"
             artistLabel.isHidden = false
             artistLabel.toolTip = message
             trackLabel.toolTip = nil

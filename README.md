@@ -254,7 +254,16 @@ before.
 ```sh
 swift probe.swift                              # OSStatus of each Core Audio tap call
 TRANSPOSIFY_SELFTEST=1 .build/debug/Transposify  # headless engagement state-machine test
+TRANSPOSIFY_ONBOARDING_TEST=1 .build/debug/Transposify # headless onboarding state matrix
+TRANSPOSIFY_ONBOARDING_UI_TEST=1 .build/debug/Transposify # AppKit layout/accessibility audit
 TRANSPOSIFY_RBTEST=1   .build/debug/Transposify  # Rubber Band pitch-accuracy check (440Hz +7st)
+```
+
+Render the representative onboarding states in both appearances without
+reading or changing the Mac's real privacy settings:
+
+```sh
+tools/test-onboarding.sh
 ```
 
 Record an engaged session and analyze its samples, delay, worker timing, ring

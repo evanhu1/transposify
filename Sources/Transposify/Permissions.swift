@@ -58,6 +58,11 @@ enum Permission {
     /// The last probe's answer. Probing is a real capture, so it is done on
     /// demand rather than every time something wants to know.
     private static var probed: State?
+    /// Core Audio tap creation is stateful system work. Serialize checks so a
+    /// launch recheck and a user request cannot create competing temporary
+    /// devices or let an older answer overwrite a newer recovery.
+    private static let probeQueue = DispatchQueue(
+        label: "com.evanhu.transposify.permission-probe", qos: .userInitiated)
 
     /// What a probe means. Running Spotify is the whole precondition:
     /// measured, a tap on a paused Spotify still delivers buffers, so silence
@@ -82,7 +87,7 @@ enum Permission {
     /// user has asked for it — otherwise a dialog appears unbidden, which is
     /// the whole thing this flow exists to avoid.
     static func checkAudio(_ completion: ((State) -> Void)? = nil) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        probeQueue.async {
             let state = read(AudioCapture.probe())
             DispatchQueue.main.async {
                 probed = state
@@ -101,9 +106,13 @@ enum Permission {
     /// Re-read the answer when doing so cannot put a question: only after the
     /// user has been asked once, and only with Spotify running, or the probe
     /// learns nothing.
-    static func recheckIfAsked(running: Bool) {
-        guard audioAsked, running, probed?.isAllowed != true else { return }
-        checkAudio()
+    static func recheckIfAsked(running: Bool,
+                               completion: ((State) -> Void)? = nil) {
+        guard audioAsked, running, probed?.isAllowed != true else {
+            completion?(audio)
+            return
+        }
+        checkAudio(completion)
     }
 
     /// Whether the app can hear Spotify, which is the only thing a person
@@ -121,7 +130,7 @@ enum Permission {
     /// the microphone for no reason — which is the bug this flow exists to
     /// prevent.
     static func requestAudio(_ completion: @escaping (State) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        probeQueue.async {
             audioAsked = true
             let state = read(AudioCapture.probe())
             // Older systems gate the tap on Microphone as well. Only a real
@@ -147,6 +156,9 @@ enum Permission {
     /// model loads. Setup treats this as needed rather than nice to have, so
     /// it is asked for in the flow rather than turning up unannounced later.
     static func spotifyControl(_ spotify: SpotifyState) -> State {
+        // A decided grant stays decided while Spotify is closed. Setup should
+        // keep completed work checked instead of making it look revoked.
+        if spotify.automation == .granted { return .allowed }
         guard spotify.isRunning else {
             return .unavailable("Open Spotify to ask for this.")
         }
@@ -165,12 +177,13 @@ enum Permission {
 
     // MARK: - Settings panes
 
-    static func openSettings(for pane: Pane) {
-        guard let url = URL(string: pane.url) else { return }
-        NSWorkspace.shared.open(url)
+    @discardableResult
+    static func openSettings(for pane: Pane) -> Bool {
+        guard let url = URL(string: pane.url) else { return false }
+        return NSWorkspace.shared.open(url)
     }
 
-    enum Pane {
+    enum Pane: Equatable {
         case audioRecording, microphone, automation
 
         var url: String {
